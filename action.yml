@@ -1,0 +1,28 @@
+name: 'GitNexus Checks'
+description: 'Run graph-derived checks against your PR.'
+author: 'GitNexus'
+inputs:
+  hub-url:
+    description: 'GitNexus Hub base URL'
+    required: false
+    default: 'https://hub.gitnexus.io'
+  token:
+    description: 'GitNexus API token (from Hub settings)'
+    required: true
+  pr-comment:
+    description: 'Whether to post a PR comment with results'
+    required: false
+    default: 'true'
+  coverage-file:
+    description: 'Path to coverage file (lcov.info, coverage.xml, etc.). Auto-detected from common locations when omitted.'
+    required: false
+  coverage-format:
+    description: 'Coverage format hint: auto, lcov, cobertura, jacoco. Default auto.'
+    required: false
+    default: 'auto'
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
+branding:
+  icon: 'check-circle'
+  color: 'purple'
