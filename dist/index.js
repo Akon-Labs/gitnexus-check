@@ -34422,20 +34422,50 @@ const SEVERITY_ICON = {
     warn: '🟡',
     pass: '🟢',
 };
+const STAGE_ICON = {
+    success: '✅',
+    failure: '❌',
+    skipped: '⚪',
+};
+const STAGE_PILL = {
+    // Inline `code` rendering acts as a status pill on GitHub.
+    success: '`success`',
+    failure: '`failure`',
+    skipped: '`skipped`',
+};
 /**
- * Render the GitNexus PR comment.
+ * Unicode progress bar of `width` cells. `pct` is 0–100. Uses block
+ * characters for filled cells and light-shade for empty. GitHub renders
+ * these in monospace inside table cells, which keeps the bar aligned.
+ */
+function progressBar(pct, width = 20) {
+    const clamped = Math.max(0, Math.min(100, pct));
+    const filled = Math.round((clamped / 100) * width);
+    const empty = width - filled;
+    return '`' + '█'.repeat(filled) + '░'.repeat(empty) + '`';
+}
+/**
+ * Format a coverage delta (current - base) as a markdown cell:
+ *   no base provided → em-dash placeholder
+ *   delta = 0        → "= 0.0%"
+ *   delta > 0        → "🔼 +0.5%"
+ *   delta < 0        → "🔽 -0.5%"
+ */
+function formatDelta(currentPct, basePct) {
+    if (basePct === undefined)
+        return '—';
+    const d = currentPct - basePct;
+    const sign = d > 0 ? '+' : '';
+    const arrow = Math.abs(d) < 0.05 ? '=' : d > 0 ? '🔼' : '🔽';
+    return `${arrow} ${sign}${d.toFixed(1)}%`;
+}
+/**
+ * Render the GitNexus PR comment with a multi-section dashboard
+ * layout: Pipeline Status → Check Results → Code Coverage → Details.
  *
- * Layout:
- *   1. Title + metadata badges (branch / commit / duration)
- *   2. Summary line ("X failed, Y warnings, Z passed")
- *   3. Results table (one row per check — icon + name + verdict)
- *   4. Per-issue collapsible <details> for fail + warn checks (showing
- *      detail rows, with optional "Fix with Claude →" CTA)
- *   5. Footer with full-report link
- *
- * The table at the top means the reader gets the verdict at a glance
- * without scrolling — same shape as SonarQube / CodeRabbit comments.
- * Pass-level checks stay in the table only (no separate noisy list).
+ * Each section is independent — sections without data simply don't
+ * render, so older callers passing only `checks` still get a clean
+ * comment, just without the dashboard sections.
  */
 function composeMarkdown(input) {
     const fails = input.checks.filter((c) => c.severity === 'fail');
@@ -34443,35 +34473,65 @@ function composeMarkdown(input) {
     const passes = input.checks.filter((c) => c.severity === 'pass');
     const total = input.checks.length;
     const durationSec = (input.durationMs / 1000).toFixed(1);
-    // ── Top banner ─────────────────────────────────────────────────────
-    const topBanner = fails.length > 0
-        ? `### 🔴 ${fails.length} failing · ${warns.length} warning${warns.length === 1 ? '' : 's'} · ${passes.length}/${total} passing`
+    // ── Headline ──────────────────────────────────────────────────────
+    const headline = fails.length > 0
+        ? `## 🔴 GitNexus CI Report — ${fails.length} failing`
         : warns.length > 0
-            ? `### 🟡 ${warns.length} warning${warns.length === 1 ? '' : 's'} · ${passes.length}/${total} passing`
-            : `### ✅ All ${total} checks passed`;
-    // ── Metadata badges (clickable shields-style) ─────────────────────
-    const metaLine = [
+            ? `## 🟡 GitNexus CI Report — ${warns.length} warning${warns.length === 1 ? '' : 's'}`
+            : `## ✅ GitNexus CI Report — All checks passed`;
+    const subline = [
         `**Branch:** \`${input.branch}\``,
         `**Commit:** [\`${input.commitSha.slice(0, 7)}\`](${input.warRoomUrl})`,
         `**Indexed:** \`${input.indexedCommit.slice(0, 7)}\``,
         `**Ran in:** \`${durationSec}s\``,
     ].join(' · ');
-    // ── Results table (one row per check) ─────────────────────────────
-    const tableRows = input.checks
+    // ── Pipeline Status table ─────────────────────────────────────────
+    const pipelineSection = input.pipeline && input.pipeline.length > 0
+        ? [
+            '### Pipeline Status',
+            '',
+            '| Stage | Status | Details |',
+            '| :-- | :-- | :-- |',
+            ...input.pipeline.map((s) => `| ${STAGE_ICON[s.status]} ${s.name} | ${STAGE_PILL[s.status]} | ${s.details.replace(/\|/g, '\\|')} |`),
+        ].join('\n')
+        : '';
+    // ── Check Results table ───────────────────────────────────────────
+    const checkRows = input.checks
         .map((c) => {
         const icon = SEVERITY_ICON[c.severity];
         const verdict = c.severity === 'fail'
             ? `**${c.summary}**`
             : c.severity === 'warn'
                 ? c.summary
-                : `_${c.summary}_`; // dim pass rows
-        // Compress long verdicts so the table doesn't blow out horizontally.
-        const compressedVerdict = verdict.length > 120 ? verdict.slice(0, 117) + '…' : verdict;
-        return `| ${icon} | ${c.title} | ${compressedVerdict.replace(/\|/g, '\\|')} |`;
+                : `_${c.summary}_`;
+        const compressed = verdict.length > 110 ? verdict.slice(0, 107) + '…' : verdict;
+        return `| ${icon} | ${c.title} | ${compressed.replace(/\|/g, '\\|')} |`;
     })
         .join('\n');
-    const table = ['| | Check | Verdict |', '| :-: | :-- | :-- |', tableRows].join('\n');
-    // ── Per-issue collapsible details (fails first, warns second) ─────
+    const checksSection = [
+        `### Check Results · ${passes.length}/${total} passing`,
+        '',
+        '| | Check | Verdict |',
+        '| :-: | :-- | :-- |',
+        checkRows,
+    ].join('\n');
+    // ── Code Coverage section ────────────────────────────────────────
+    const coverageSection = input.coverage && input.coverage.length > 0
+        ? [
+            '### 📊 Code Coverage',
+            '',
+            '| Metric | Coverage | Covered | Delta | Status |',
+            '| :-- | --: | :-- | :-- | :-- |',
+            ...input.coverage.map((m) => {
+                const pct = m.total > 0 ? (m.covered / m.total) * 100 : 0;
+                const pctStr = `**${pct.toFixed(2)}%**`;
+                const covered = `\`${m.covered.toLocaleString()} / ${m.total.toLocaleString()}\``;
+                const delta = formatDelta(pct, m.basePct);
+                return `| ${m.metric} | ${pctStr} | ${covered} | ${delta} | ${progressBar(pct)} |`;
+            }),
+        ].join('\n')
+        : '';
+    // ── Per-issue collapsibles for fails + warns ─────────────────────
     const issuesSection = [...fails, ...warns]
         .map((c) => {
         const fixLink = input.claudeEnabled && input.repoFullName
@@ -34500,13 +34560,15 @@ function composeMarkdown(input) {
     // ── Compose ───────────────────────────────────────────────────────
     return [
         exports.MARKER,
-        `## 🔍 GitNexus Checks`,
-        metaLine,
+        headline,
+        subline,
         '',
-        topBanner,
+        pipelineSection,
+        pipelineSection ? '' : null,
+        checksSection,
         '',
-        table,
-        '',
+        coverageSection,
+        coverageSection ? '' : null,
         issuesSection ? `### Details` : '',
         issuesSection,
         '',
@@ -34515,7 +34577,7 @@ function composeMarkdown(input) {
         `---`,
         `<sub>🤖 Need help? Comment \`@claude review this PR\` or \`@claude generate tests\`.</sub>`,
     ]
-        .filter((s) => s !== '')
+        .filter((s) => s !== null && s !== '')
         .join('\n');
 }
 function findMarkerComment(comments) {
@@ -34703,6 +34765,13 @@ async function main() {
     const headSha = pr.head.sha;
     const repoFullName = `${ctx.repo.owner}/${ctx.repo.repo}`;
     const repoId = await resolveRepoId({ hubUrl, token, fullName: repoFullName });
+    // Track per-stage timing for the dashboard's Pipeline Status table.
+    // Each stage records its duration + outcome so the comment can render
+    // a clear breakdown of where time went and what failed.
+    const pipeline = [];
+    let coverage;
+    // ── Stage: indexing (bundle + reindex + poll) ──
+    const tIndexStart = Date.now();
     const bundlePath = path.join(os.tmpdir(), `gitnexus-pr-${prNumber}.bundle`);
     core.info(`Creating bundle for ${headSha}`);
     await (0, bundle_1.createBundle)({
@@ -34723,16 +34792,18 @@ async function main() {
     core.info('Waiting for indexing');
     const ready = await (0, upload_1.pollUntilReady)({ statusUrl: reindex.statusUrl, hubUrl, token });
     core.info(`Indexed commit: ${ready.indexedCommit}`);
-    // Phase 15: optional coverage upload. Auto-detect from common
-    // paths if `coverage-file` input is omitted. Silent skip when
-    // nothing is found — the coverage-gap check no-ops in that case
-    // with an instructional summary, and we don't want to fail the
-    // action just because a repo hasn't wired coverage yet.
+    pipeline.push({
+        name: 'Indexing',
+        status: 'success',
+        details: `\`${ready.indexedCommit.slice(0, 7)}\` indexed in ${((Date.now() - tIndexStart) / 1000).toFixed(1)}s`,
+    });
+    // ── Stage: coverage upload (optional) ──
     const coverageInput = core.getInput('coverage-file') || undefined;
     const coverageFormat = core.getInput('coverage-format') || 'auto';
     const coveragePath = (0, coverage_1.findCoverageFile)(process.cwd(), coverageInput);
     if (coveragePath) {
         core.info(`Uploading coverage from ${coveragePath}`);
+        const tCovStart = Date.now();
         try {
             const upload = await (0, coverage_1.uploadCoverage)({
                 hubUrl,
@@ -34744,22 +34815,61 @@ async function main() {
                 format: coverageFormat,
             });
             core.info(`Coverage uploaded: format=${upload.format}, files=${upload.filesCount}, hit=${upload.hitLinesCount}, missed=${upload.missedLinesCount}`);
+            pipeline.push({
+                name: 'Coverage',
+                status: 'success',
+                details: `${upload.format}, ${upload.filesCount} file${upload.filesCount === 1 ? '' : 's'} in ${((Date.now() - tCovStart) / 1000).toFixed(1)}s`,
+            });
+            // Single-metric (lines) coverage row for the dashboard. Multi-metric
+            // (branches/functions/statements) requires a richer parser response
+            // and the Hub returning per-metric aggregates — tracked separately.
+            coverage = [
+                {
+                    metric: 'Lines',
+                    covered: upload.hitLinesCount,
+                    total: upload.hitLinesCount + upload.missedLinesCount,
+                },
+            ];
         }
         catch (err) {
             // Non-fatal — coverage-gap check just falls back to its no-op
             // pass. We surface the error as a warning so the user can
             // diagnose without the whole action failing.
-            core.warning(`Coverage upload failed: ${err instanceof Error ? err.message : String(err)}`);
+            const msg = err instanceof Error ? err.message : String(err);
+            core.warning(`Coverage upload failed: ${msg}`);
+            pipeline.push({
+                name: 'Coverage',
+                status: 'failure',
+                details: `upload failed: ${msg.slice(0, 60)}`,
+            });
         }
     }
     else if (coverageInput) {
         core.warning(`coverage-file input set to "${coverageInput}" but file not found — skipping`);
+        pipeline.push({
+            name: 'Coverage',
+            status: 'skipped',
+            details: `coverage-file: \`${coverageInput}\` not found`,
+        });
     }
     else {
         core.info('No coverage file found in common paths — skipping (set coverage-file: to enable)');
+        pipeline.push({
+            name: 'Coverage',
+            status: 'skipped',
+            details: 'no coverage file detected — set `coverage-file` to enable',
+        });
     }
+    // ── Stage: graph checks ──
     core.info('Running check suite');
+    const tChecksStart = Date.now();
     const suite = await (0, upload_1.runChecks)({ hubUrl, token, repoId, prNumber });
+    const failingCount = suite.checks.filter((c) => c.severity === 'fail').length;
+    pipeline.push({
+        name: 'Graph checks',
+        status: failingCount > 0 ? 'failure' : 'success',
+        details: `${suite.checks.length} checks ran in ${((Date.now() - tChecksStart) / 1000).toFixed(1)}s`,
+    });
     const markdown = (0, comment_1.composeMarkdown)({
         ...suite,
         branch: branchName,
@@ -34771,6 +34881,8 @@ async function main() {
         // sourced from the Hub's checks response (`repo.claudeEnabled`) so
         // the action doesn't need a second round-trip.
         claudeEnabled: suite.repo?.claudeEnabled === true,
+        pipeline,
+        coverage,
     });
     core.setOutput('checks-json', JSON.stringify(suite.checks));
     core.setOutput('summary-markdown', markdown);
