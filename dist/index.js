@@ -34811,7 +34811,10 @@ async function uploadBundle(opts) {
     form.append('prNumber', String(opts.prNumber));
     form.append('branchName', opts.branchName);
     form.append('bundle', fs.createReadStream(opts.bundlePath));
-    const res = await axios_1.default.post(`${opts.hubUrl}/api/repos/${opts.repoId}/reindex`, form, {
+    // POST to the bundle-upload route specifically, distinct from the
+    // generic `/:id/reindex` which only triggers a re-clone and doesn't
+    // accept a bundle.
+    const res = await axios_1.default.post(`${opts.hubUrl}/api/repos/${opts.repoId}/branch-reindex`, form, {
         headers: { ...form.getHeaders(), Authorization: `Bearer ${opts.token}` },
         maxContentLength: 100 * 1024 * 1024,
         maxBodyLength: 100 * 1024 * 1024,
