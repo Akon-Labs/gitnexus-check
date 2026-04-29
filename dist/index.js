@@ -34724,9 +34724,13 @@ async function main() {
     core.setOutput('checks-json', JSON.stringify(suite.checks));
     core.setOutput('summary-markdown', markdown);
     if (postComment) {
-        const githubToken = process.env.GITHUB_TOKEN;
+        // Pull from the `github-token` input first (defaults to `${{ github.token }}`
+        // in action.yml — auto-resolves to the workflow's GITHUB_TOKEN as long as
+        // the workflow has `permissions: pull-requests: write`). Fall back to the
+        // env var for back-compat with workflows pinned to older action versions.
+        const githubToken = core.getInput('github-token') || process.env.GITHUB_TOKEN;
         if (!githubToken) {
-            core.warning('GITHUB_TOKEN not set — skipping PR comment');
+            core.warning('github-token input + GITHUB_TOKEN env both empty — skipping PR comment');
         }
         else {
             const octokit = github.getOctokit(githubToken);

@@ -13,6 +13,10 @@ inputs:
     description: 'Whether to post a PR comment with results'
     required: false
     default: 'true'
+  github-token:
+    description: 'GitHub token used to post the PR comment. Defaults to the workflow-injected token (github.token), which is sufficient as long as the workflow has permissions: pull-requests: write.'
+    required: false
+    default: ${{ github.token }}
   coverage-file:
     description: 'Path to coverage file (lcov.info, coverage.xml, etc.). Auto-detected from common locations when omitted.'
     required: false
