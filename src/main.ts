@@ -33,7 +33,12 @@ async function main() {
 
   const bundlePath = path.join(os.tmpdir(), `gitnexus-pr-${prNumber}.bundle`);
   core.info(`Creating bundle for ${headSha}`);
-  await createBundle({ ref: headSha, outPath: bundlePath, cwd: process.cwd() });
+  await createBundle({
+    ref: headSha,
+    branchName,
+    outPath: bundlePath,
+    cwd: process.cwd(),
+  });
 
   core.info('Uploading bundle to Hub');
   const reindex = await uploadBundle({
