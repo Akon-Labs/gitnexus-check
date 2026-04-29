@@ -142,8 +142,14 @@ async function resolveRepoId(opts: {
   const res = await axios.get(`${opts.hubUrl}/api/repos`, {
     headers: { Authorization: `Bearer ${opts.token}` },
   });
-  const repos: Array<{ id: string; full_name: string }> = res.data.repos ?? res.data;
-  const match = repos.find((r) => r.full_name === opts.fullName);
+  // The Hub returns `fullName` (camelCase); some older deployments
+  // returned `full_name` (snake_case). Accept both so the action keeps
+  // working against either response shape.
+  const repos: Array<{ id: string; fullName?: string; full_name?: string }> =
+    res.data.repos ?? res.data;
+  const match = repos.find(
+    (r) => r.fullName === opts.fullName || r.full_name === opts.fullName,
+  );
   if (!match) throw new Error(`repo ${opts.fullName} not registered on Hub`);
   return match.id;
 }
