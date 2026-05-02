@@ -2,36 +2,22 @@ import axios from 'axios';
 import FormData from 'form-data';
 import * as fs from 'node:fs';
 
+/**
+ * Bundle upload + status polling against the Hub's lean Phase-2
+ * branch-reindex endpoint. Differences from v1:
+ *   - No checks fan-out — Claude runs in a separate workflow step.
+ *   - No coverage upload here.
+ *   - The `runChecks` helper from v1 is removed.
+ */
+
 export interface ReindexResult {
   id: string;
   status: string;
   statusUrl: string;
 }
 
-export interface CheckSuiteResult {
-  prNumber: number;
-  checks: Array<{
-    id: string;
-    title: string;
-    severity: 'pass' | 'warn' | 'fail';
-    summary: string;
-    details: Array<{
-      location: { file: string; line: number; column?: number };
-      message: string;
-      evidence?: unknown;
-    }>;
-  }>;
-  warRoomUrl: string;
-  durationMs: number;
-  /**
-   * Per-repo Claude opt-in flag, surfaced from the Hub so the action can
-   * decide whether to render "Fix with Claude →" links in the PR comment.
-   * Optional for backwards-compat with older Hubs that don't yet send it.
-   * Phase 13 of the CI integration plan.
-   */
-  repo?: {
-    claudeEnabled: boolean;
-  };
+export interface IndexReady {
+  indexedCommit: string;
 }
 
 export async function uploadBundle(opts: {
@@ -47,28 +33,29 @@ export async function uploadBundle(opts: {
   form.append('branchName', opts.branchName);
   form.append('bundle', fs.createReadStream(opts.bundlePath));
 
-  // POST to the bundle-upload route specifically, distinct from the
-  // generic `/:id/reindex` which only triggers a re-clone and doesn't
-  // accept a bundle.
-  const res = await axios.post(
-    `${opts.hubUrl}/api/repos/${opts.repoId}/branch-reindex`,
-    form,
-    {
-      headers: { ...form.getHeaders(), Authorization: `Bearer ${opts.token}` },
-      maxContentLength: 100 * 1024 * 1024,
-      maxBodyLength: 100 * 1024 * 1024,
-    },
-  );
+  const res = await axios.post(`${opts.hubUrl}/api/repos/${opts.repoId}/branch-reindex`, form, {
+    headers: { ...form.getHeaders(), Authorization: `Bearer ${opts.token}` },
+    maxContentLength: 100 * 1024 * 1024,
+    maxBodyLength: 100 * 1024 * 1024,
+  });
   return res.data;
 }
 
+/**
+ * Poll the status URL until indexing is `ready` or `error`.
+ *
+ * pollIntervalMs is exposed so tests can run with 0 (fake-time loop)
+ * without sleeping for real.
+ */
 export async function pollUntilReady(opts: {
   statusUrl: string;
   hubUrl: string;
   token: string;
   timeoutMs?: number;
-}): Promise<{ indexedCommit: string }> {
+  pollIntervalMs?: number;
+}): Promise<IndexReady> {
   const timeout = opts.timeoutMs ?? 5 * 60_000;
+  const interval = opts.pollIntervalMs ?? 3000;
   const t0 = Date.now();
   while (Date.now() - t0 < timeout) {
     const res = await axios.get(`${opts.hubUrl}${opts.statusUrl}`, {
@@ -76,21 +63,7 @@ export async function pollUntilReady(opts: {
     });
     if (res.data.status === 'ready') return { indexedCommit: res.data.indexedCommit };
     if (res.data.status === 'error') throw new Error(`indexing failed: ${res.data.error}`);
-    await new Promise((r) => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, interval));
   }
   throw new Error('indexing timed out');
-}
-
-export async function runChecks(opts: {
-  hubUrl: string;
-  token: string;
-  repoId: string;
-  prNumber: number;
-}): Promise<CheckSuiteResult> {
-  const res = await axios.post(
-    `${opts.hubUrl}/api/repos/${opts.repoId}/checks/${opts.prNumber}`,
-    {},
-    { headers: { Authorization: `Bearer ${opts.token}` } },
-  );
-  return res.data;
 }

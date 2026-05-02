@@ -5,15 +5,32 @@ import * as exec from '@actions/exec';
 vi.mock('@actions/exec');
 
 describe('createBundle', () => {
-  it('runs git bundle create with the given ref and out path', async () => {
+  it('creates a refs/heads ref then bundles --all', async () => {
+    // The Hub indexer clones the bundle with `git clone --branch <name>`,
+    // which only resolves refs under refs/heads. actions/checkout@v6
+    // leaves the workdir in detached HEAD with the branch only under
+    // refs/remotes/origin/<name>, so we manually create the heads ref
+    // before bundling. Then bundle --all so every ref the runner has
+    // (including the freshly-created one) lands in the bundle.
     const execMock = vi.mocked(exec.exec).mockResolvedValue(0);
-    await createBundle({ ref: 'abc123', outPath: '/tmp/pr.bundle', cwd: '/repo' });
-    expect(execMock).toHaveBeenCalledWith(
+    await createBundle({
+      ref: 'abc123',
+      branchName: 'feat/foo',
+      outPath: '/tmp/pr.bundle',
+      cwd: '/repo',
+    });
+    expect(execMock).toHaveBeenCalledTimes(2);
+    expect(execMock).toHaveBeenNthCalledWith(
+      1,
       'git',
-      expect.arrayContaining(['bundle', 'create', '/tmp/pr.bundle']),
+      ['update-ref', 'refs/heads/feat/foo', 'abc123'],
       { cwd: '/repo' },
     );
-    const args = execMock.mock.calls[0][1] as string[];
-    expect(args).toEqual(['bundle', 'create', '/tmp/pr.bundle', 'abc123']);
+    expect(execMock).toHaveBeenNthCalledWith(
+      2,
+      'git',
+      ['bundle', 'create', '/tmp/pr.bundle', '--all'],
+      { cwd: '/repo' },
+    );
   });
 });

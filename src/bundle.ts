@@ -5,7 +5,7 @@ import * as exec from '@actions/exec';
  * PR head, with a local branch ref so the Hub indexer can clone it
  * with `git clone --branch <branchName> <bundle>`.
  *
- * actions/checkout@v4 (with fetch-depth: 0) leaves the workdir with
+ * actions/checkout@v6 (with fetch-depth: 0) leaves the workdir with
  * the head SHA detached and the branch only available under
  * `refs/remotes/origin/<branchName>`. `git bundle create --all` would
  * then produce a bundle without `refs/heads/<branchName>`, so the

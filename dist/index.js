@@ -11760,6 +11760,88 @@ function onceStrict (fn) {
 
 /***/ }),
 
+/***/ 7336:
+/***/ ((module) => {
+
+let p = process || {}, argv = p.argv || [], env = p.env || {}
+let isColorSupported =
+	!(!!env.NO_COLOR || argv.includes("--no-color")) &&
+	(!!env.FORCE_COLOR || argv.includes("--color") || p.platform === "win32" || ((p.stdout || {}).isTTY && env.TERM !== "dumb") || !!env.CI)
+
+let formatter = (open, close, replace = open) =>
+	input => {
+		let string = "" + input, index = string.indexOf(close, open.length)
+		return ~index ? open + replaceClose(string, close, replace, index) + close : open + string + close
+	}
+
+let replaceClose = (string, close, replace, index) => {
+	let result = "", cursor = 0
+	do {
+		result += string.substring(cursor, index) + replace
+		cursor = index + close.length
+		index = string.indexOf(close, cursor)
+	} while (~index)
+	return result + string.substring(cursor)
+}
+
+let createColors = (enabled = isColorSupported) => {
+	let f = enabled ? formatter : () => String
+	return {
+		isColorSupported: enabled,
+		reset: f("\x1b[0m", "\x1b[0m"),
+		bold: f("\x1b[1m", "\x1b[22m", "\x1b[22m\x1b[1m"),
+		dim: f("\x1b[2m", "\x1b[22m", "\x1b[22m\x1b[2m"),
+		italic: f("\x1b[3m", "\x1b[23m"),
+		underline: f("\x1b[4m", "\x1b[24m"),
+		inverse: f("\x1b[7m", "\x1b[27m"),
+		hidden: f("\x1b[8m", "\x1b[28m"),
+		strikethrough: f("\x1b[9m", "\x1b[29m"),
+
+		black: f("\x1b[30m", "\x1b[39m"),
+		red: f("\x1b[31m", "\x1b[39m"),
+		green: f("\x1b[32m", "\x1b[39m"),
+		yellow: f("\x1b[33m", "\x1b[39m"),
+		blue: f("\x1b[34m", "\x1b[39m"),
+		magenta: f("\x1b[35m", "\x1b[39m"),
+		cyan: f("\x1b[36m", "\x1b[39m"),
+		white: f("\x1b[37m", "\x1b[39m"),
+		gray: f("\x1b[90m", "\x1b[39m"),
+
+		bgBlack: f("\x1b[40m", "\x1b[49m"),
+		bgRed: f("\x1b[41m", "\x1b[49m"),
+		bgGreen: f("\x1b[42m", "\x1b[49m"),
+		bgYellow: f("\x1b[43m", "\x1b[49m"),
+		bgBlue: f("\x1b[44m", "\x1b[49m"),
+		bgMagenta: f("\x1b[45m", "\x1b[49m"),
+		bgCyan: f("\x1b[46m", "\x1b[49m"),
+		bgWhite: f("\x1b[47m", "\x1b[49m"),
+
+		blackBright: f("\x1b[90m", "\x1b[39m"),
+		redBright: f("\x1b[91m", "\x1b[39m"),
+		greenBright: f("\x1b[92m", "\x1b[39m"),
+		yellowBright: f("\x1b[93m", "\x1b[39m"),
+		blueBright: f("\x1b[94m", "\x1b[39m"),
+		magentaBright: f("\x1b[95m", "\x1b[39m"),
+		cyanBright: f("\x1b[96m", "\x1b[39m"),
+		whiteBright: f("\x1b[97m", "\x1b[39m"),
+
+		bgBlackBright: f("\x1b[100m", "\x1b[49m"),
+		bgRedBright: f("\x1b[101m", "\x1b[49m"),
+		bgGreenBright: f("\x1b[102m", "\x1b[49m"),
+		bgYellowBright: f("\x1b[103m", "\x1b[49m"),
+		bgBlueBright: f("\x1b[104m", "\x1b[49m"),
+		bgMagentaBright: f("\x1b[105m", "\x1b[49m"),
+		bgCyanBright: f("\x1b[106m", "\x1b[49m"),
+		bgWhiteBright: f("\x1b[107m", "\x1b[49m"),
+	}
+}
+
+module.exports = createColors()
+module.exports.createColors = createColors
+
+
+/***/ }),
+
 /***/ 770:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
@@ -34320,7 +34402,7 @@ const exec = __importStar(__nccwpck_require__(5236));
  * PR head, with a local branch ref so the Hub indexer can clone it
  * with `git clone --branch <branchName> <bundle>`.
  *
- * actions/checkout@v4 (with fetch-depth: 0) leaves the workdir with
+ * actions/checkout@v6 (with fetch-depth: 0) leaves the workdir with
  * the head SHA detached and the branch only available under
  * `refs/remotes/origin/<branchName>`. `git bundle create --all` would
  * then produce a bundle without `refs/heads/<branchName>`, so the
@@ -34347,247 +34429,52 @@ async function createBundle(opts) {
 
 /***/ }),
 
-/***/ 9820:
-/***/ ((__unused_webpack_module, exports) => {
+/***/ 7096:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
 "use strict";
 
-/**
- * Per-check @claude command map and helpers.
- *
- * Phase 13 of the CI integration plan. The map is intentionally duplicated
- * across the action (this file) and the Hub backend
- * (`gitnexus-hub/src/services/claude/commands.ts`) so the two artifacts
- * deploy independently — there is no runtime dependency between them.
- *
- * KEEP THIS FILE IN SYNC with `gitnexus-hub/src/services/claude/commands.ts`.
- *
- * The action uses these to render "Fix with Claude →" links in the PR
- * comment; the Hub backend uses them to validate the `checkId` body of the
- * `/api/repos/:id/prs/:prNumber/claude-trigger` route and post the matching
- * `@claude` command on behalf of the user.
- */
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.CLAUDE_COMMANDS = void 0;
-exports.claudeFixLink = claudeFixLink;
-exports.getClaudeCommand = getClaudeCommand;
-exports.CLAUDE_COMMANDS = {
-    'incomplete-rename': '@claude finish the rename in this PR — update all stale callers',
-    'route-shape-drift': '@claude align consumers with the new route response shape',
-    'dead-code': '@claude remove the unused symbols flagged in this check',
-    'cycle-introduction': '@claude break the cycle introduced in this PR',
-    'orphan-on-arrival': '@claude either wire up the new exports or remove them',
-    'public-api-diff': '@claude check whether these public API changes need a semver bump in the changelog',
-    'hot-path-edits': '@claude review the hot-path changes carefully — these are on critical execution flows',
-    'no-framework': '@claude scaffold a test framework for this repo using the conventional setup',
-    'coverage-gap': '@claude generate tests covering the uncovered changed lines flagged in this check',
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
 };
-/**
- * Build a GitHub comment-prefill URL for the given check on the given PR.
- * Clicking the link opens the issue/PR comment box pre-populated with the
- * canonical `@claude` command for that check, so the user just clicks
- * "Comment" to fire the workflow.
- *
- * Returns `null` when the check id is not in CLAUDE_COMMANDS — callers
- * should treat that as "no Fix link for this check".
- */
-function claudeFixLink(repo, prNumber, checkId) {
-    const cmd = exports.CLAUDE_COMMANDS[checkId];
-    if (!cmd)
-        return null;
-    const body = encodeURIComponent(cmd);
-    return `https://github.com/${repo}/issues/${prNumber}#new-comment-form?body=${body}`;
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.fetchContextPack = fetchContextPack;
+exports.resolveRepoId = resolveRepoId;
+const axios_1 = __importDefault(__nccwpck_require__(7269));
+async function fetchContextPack(opts) {
+    const res = await axios_1.default.post(`${opts.hubUrl}/api/repos/${opts.repoId}/context-pack`, opts.request, {
+        headers: {
+            Authorization: `Bearer ${opts.token}`,
+            'Content-Type': 'application/json',
+        },
+        // Context Pack JSON is small — typically < 500KB even with full
+        // changedSymbols + cross-repo data. Bound the body to 5MB so a
+        // misbehaving Hub doesn't OOM the runner.
+        maxContentLength: 5 * 1024 * 1024,
+        maxBodyLength: 5 * 1024 * 1024,
+    });
+    return res.data;
 }
-/** Lookup helper used by the Hub-side claude-trigger route. */
-function getClaudeCommand(checkId) {
-    return exports.CLAUDE_COMMANDS[checkId] ?? null;
+/**
+ * Resolve the repo's UUID on the Hub from its full name. Mirrors v1
+ * behaviour and tolerates both camelCase + snake_case shapes for back-
+ * compat with older Hub deployments.
+ */
+async function resolveRepoId(opts) {
+    const res = await axios_1.default.get(`${opts.hubUrl}/api/repos`, {
+        headers: { Authorization: `Bearer ${opts.token}` },
+    });
+    const repos = res.data.repos ?? res.data;
+    const match = repos.find((r) => r.fullName === opts.fullName || r.full_name === opts.fullName);
+    if (!match)
+        throw new Error(`repo ${opts.fullName} not registered on Hub`);
+    return match.id;
 }
 
 
 /***/ }),
 
-/***/ 2246:
-/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
-
-"use strict";
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.MARKER = void 0;
-exports.composeMarkdown = composeMarkdown;
-exports.findMarkerComment = findMarkerComment;
-const claude_commands_1 = __nccwpck_require__(9820);
-exports.MARKER = '<!-- gitnexus-pr-comment-v1 -->';
-const SEVERITY_ICON = {
-    fail: '🔴',
-    warn: '🟡',
-    pass: '🟢',
-};
-const STAGE_ICON = {
-    success: '✅',
-    failure: '❌',
-    skipped: '⚪',
-};
-const STAGE_PILL = {
-    // Inline `code` rendering acts as a status pill on GitHub.
-    success: '`success`',
-    failure: '`failure`',
-    skipped: '`skipped`',
-};
-/**
- * Unicode progress bar of `width` cells. `pct` is 0–100. Uses block
- * characters for filled cells and light-shade for empty. GitHub renders
- * these in monospace inside table cells, which keeps the bar aligned.
- */
-function progressBar(pct, width = 20) {
-    const clamped = Math.max(0, Math.min(100, pct));
-    const filled = Math.round((clamped / 100) * width);
-    const empty = width - filled;
-    return '`' + '█'.repeat(filled) + '░'.repeat(empty) + '`';
-}
-/**
- * Format a coverage delta (current - base) as a markdown cell:
- *   no base provided → em-dash placeholder
- *   delta = 0        → "= 0.0%"
- *   delta > 0        → "🔼 +0.5%"
- *   delta < 0        → "🔽 -0.5%"
- */
-function formatDelta(currentPct, basePct) {
-    if (basePct === undefined)
-        return '—';
-    const d = currentPct - basePct;
-    const sign = d > 0 ? '+' : '';
-    const arrow = Math.abs(d) < 0.05 ? '=' : d > 0 ? '🔼' : '🔽';
-    return `${arrow} ${sign}${d.toFixed(1)}%`;
-}
-/**
- * Render the GitNexus PR comment with a multi-section dashboard
- * layout: Pipeline Status → Check Results → Code Coverage → Details.
- *
- * Each section is independent — sections without data simply don't
- * render, so older callers passing only `checks` still get a clean
- * comment, just without the dashboard sections.
- */
-function composeMarkdown(input) {
-    const fails = input.checks.filter((c) => c.severity === 'fail');
-    const warns = input.checks.filter((c) => c.severity === 'warn');
-    const passes = input.checks.filter((c) => c.severity === 'pass');
-    const total = input.checks.length;
-    const durationSec = (input.durationMs / 1000).toFixed(1);
-    // ── Headline ──────────────────────────────────────────────────────
-    const headline = fails.length > 0
-        ? `## 🔴 GitNexus CI Report — ${fails.length} failing`
-        : warns.length > 0
-            ? `## 🟡 GitNexus CI Report — ${warns.length} warning${warns.length === 1 ? '' : 's'}`
-            : `## ✅ GitNexus CI Report — All checks passed`;
-    const subline = [
-        `**Branch:** \`${input.branch}\``,
-        `**Commit:** [\`${input.commitSha.slice(0, 7)}\`](${input.warRoomUrl})`,
-        `**Indexed:** \`${input.indexedCommit.slice(0, 7)}\``,
-        `**Ran in:** \`${durationSec}s\``,
-    ].join(' · ');
-    // ── Pipeline Status table ─────────────────────────────────────────
-    const pipelineSection = input.pipeline && input.pipeline.length > 0
-        ? [
-            '### Pipeline Status',
-            '',
-            '| Stage | Status | Details |',
-            '| :-- | :-- | :-- |',
-            ...input.pipeline.map((s) => `| ${STAGE_ICON[s.status]} ${s.name} | ${STAGE_PILL[s.status]} | ${s.details.replace(/\|/g, '\\|')} |`),
-        ].join('\n')
-        : '';
-    // ── Check Results table ───────────────────────────────────────────
-    const checkRows = input.checks
-        .map((c) => {
-        const icon = SEVERITY_ICON[c.severity];
-        const verdict = c.severity === 'fail'
-            ? `**${c.summary}**`
-            : c.severity === 'warn'
-                ? c.summary
-                : `_${c.summary}_`;
-        const compressed = verdict.length > 110 ? verdict.slice(0, 107) + '…' : verdict;
-        return `| ${icon} | ${c.title} | ${compressed.replace(/\|/g, '\\|')} |`;
-    })
-        .join('\n');
-    const checksSection = [
-        `### Check Results · ${passes.length}/${total} passing`,
-        '',
-        '| | Check | Verdict |',
-        '| :-: | :-- | :-- |',
-        checkRows,
-    ].join('\n');
-    // ── Code Coverage section ────────────────────────────────────────
-    const coverageSection = input.coverage && input.coverage.length > 0
-        ? [
-            '### 📊 Code Coverage',
-            '',
-            '| Metric | Coverage | Covered | Delta | Status |',
-            '| :-- | --: | :-- | :-- | :-- |',
-            ...input.coverage.map((m) => {
-                const pct = m.total > 0 ? (m.covered / m.total) * 100 : 0;
-                const pctStr = `**${pct.toFixed(2)}%**`;
-                const covered = `\`${m.covered.toLocaleString()} / ${m.total.toLocaleString()}\``;
-                const delta = formatDelta(pct, m.basePct);
-                return `| ${m.metric} | ${pctStr} | ${covered} | ${delta} | ${progressBar(pct)} |`;
-            }),
-        ].join('\n')
-        : '';
-    // ── Per-issue collapsibles for fails + warns ─────────────────────
-    const issuesSection = [...fails, ...warns]
-        .map((c) => {
-        const fixLink = input.claudeEnabled && input.repoFullName
-            ? (0, claude_commands_1.claudeFixLink)(input.repoFullName, input.prNumber, c.id)
-            : null;
-        const fixLine = fixLink ? `\n\n[**Fix with Claude →**](${fixLink})` : '';
-        const detailLines = c.details.length === 0
-            ? '_no per-location details_'
-            : c.details
-                .slice(0, 10)
-                .map((d) => `- \`${d.location.file}:${d.location.line}\` — ${d.message}`)
-                .join('\n') +
-                (c.details.length > 10 ? `\n- _… and ${c.details.length - 10} more_` : '');
-        const sevIcon = c.severity === 'fail' ? '🔴' : '🟡';
-        const sevLabel = c.severity === 'fail' ? 'Failed' : 'Warning';
-        return [
-            `<details>`,
-            `<summary>${sevIcon} <b>${c.title}</b> — ${sevLabel}: ${c.summary}</summary>`,
-            '',
-            detailLines + fixLine,
-            '',
-            `</details>`,
-        ].join('\n');
-    })
-        .join('\n\n');
-    // ── Compose ───────────────────────────────────────────────────────
-    return [
-        exports.MARKER,
-        headline,
-        subline,
-        '',
-        pipelineSection,
-        pipelineSection ? '' : null,
-        checksSection,
-        '',
-        coverageSection,
-        coverageSection ? '' : null,
-        issuesSection ? `### Details` : '',
-        issuesSection,
-        '',
-        `[**View full report on the war-room dashboard →**](${input.warRoomUrl})`,
-        '',
-        `---`,
-        `<sub>🤖 Need help? Comment \`@claude review this PR\` or \`@claude generate tests\`.</sub>`,
-    ]
-        .filter((s) => s !== null && s !== '')
-        .join('\n');
-}
-function findMarkerComment(comments) {
-    return comments.find((c) => (c.body ?? '').includes(exports.MARKER));
-}
-
-
-/***/ }),
-
-/***/ 1713:
+/***/ 9952:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
 "use strict";
@@ -34625,75 +34512,212 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.findCoverageFile = findCoverageFile;
-exports.uploadCoverage = uploadCoverage;
+exports.BIG_DIFF_FILE_THRESHOLD = void 0;
+exports.computeDiffStats = computeDiffStats;
+exports.parseDiff = parseDiff;
+exports.shouldReindex = shouldReindex;
+const exec = __importStar(__nccwpck_require__(5236));
 /**
- * Coverage upload helpers — Phase 15 Task 15.4 (action side).
- *
- * Two pieces of work:
- *
- *   1. findCoverageFile(workdir, explicitPath?) — locate the
- *      coverage report on disk. If `explicitPath` is provided, just
- *      verify it exists. Otherwise probe a small list of common
- *      locations (Vitest/Jest, generic Cobertura, Maven/Gradle
- *      JaCoCo). Returns null if nothing is found — the caller
- *      should treat that as "user hasn't wired coverage yet" and
- *      skip the upload silently.
- *
- *   2. uploadCoverage({...}) — POST the file to
- *      /api/repos/:id/coverage with multipart form data. Mirrors
- *      uploadBundle in upload.ts so the two share auth / size
- *      conventions.
+ * Threshold above which we always run a full reindex. Mirrors the
+ * design-doc default; keep this in sync with any Hub-side check.
  */
-const fs = __importStar(__nccwpck_require__(3024));
-const path = __importStar(__nccwpck_require__(6760));
-const axios_1 = __importDefault(__nccwpck_require__(7269));
-const form_data_1 = __importDefault(__nccwpck_require__(6454));
+exports.BIG_DIFF_FILE_THRESHOLD = 50;
 /**
- * Probe paths in priority order. The order is meaningful: lcov is
- * the most common (Vitest/Jest default), so we hit it first to
- * avoid a half-dozen fs.existsSync calls in the happy path.
+ * Compute diff stats by shelling out to `git`. The runner has both
+ * the head SHA checked out (via actions/checkout) and the base SHA
+ * fetchable via `fetch-depth: 0`, so this is a local-only operation.
+ *
+ * If git fails for any reason (e.g. shallow checkout, force-push that
+ * orphaned the base SHA), we return an empty-files diff with `isBigDiff`
+ * conservatively set to `true` so the action falls back to the safer
+ * full-reindex path. The Hub side handles `files: []` gracefully.
  */
-const COMMON_COVERAGE_PATHS = [
-    // istanbul / nyc / vitest / jest
-    'coverage/lcov.info',
-    // generic naming
-    'coverage.xml',
-    'cobertura-coverage.xml',
-    'coverage/cobertura-coverage.xml',
-    // Maven / Gradle JaCoCo
-    'target/site/jacoco/jacoco.xml',
-    'build/reports/jacoco/test/jacocoTestReport.xml',
-    'build/reports/jacoco/jacocoTestReport.xml',
-];
-function findCoverageFile(workdir, explicitPath) {
-    if (explicitPath) {
-        const abs = path.resolve(workdir, explicitPath);
-        return fs.existsSync(abs) ? abs : null;
+async function computeDiffStats(opts) {
+    // numstat: per-file added/deleted counts (or `-` for binary).
+    // name-status: per-file status letter (A/M/D/R<score>).
+    // We run both in parallel-ish (sequential here because @actions/exec
+    // doesn't expose Promise.all-friendly streaming, but the cost is
+    // ms-level so it's not worth the extra plumbing).
+    // Run each git command in its own try/catch so partial output
+    // survives — if --numstat succeeds but --name-status fails we'd
+    // otherwise discard the valid line counts and force an unnecessary
+    // full reindex. With independent guards we keep what we got and
+    // simply lose rename detection on the second-cmd-fail path.
+    let numstatOut = '';
+    let nameStatusOut = '';
+    try {
+        await exec.exec('git', ['diff', '--numstat', `${opts.baseSha}..${opts.headSha}`], {
+            cwd: opts.cwd,
+            listeners: {
+                stdout: (chunk) => {
+                    numstatOut += chunk.toString();
+                },
+            },
+            silent: true,
+        });
     }
-    for (const candidate of COMMON_COVERAGE_PATHS) {
-        const abs = path.resolve(workdir, candidate);
-        if (fs.existsSync(abs))
-            return abs;
+    catch {
+        // numstat failed — we have nothing to derive from. Conservative
+        // fallback: assume big diff so we reindex rather than ship a wrong
+        // lazy decision.
+        return {
+            files: [],
+            filesChanged: 0,
+            linesAdded: 0,
+            linesDeleted: 0,
+            hasRename: false,
+            isBigDiff: true,
+        };
     }
-    return null;
+    try {
+        await exec.exec('git', ['diff', '--name-status', `${opts.baseSha}..${opts.headSha}`], {
+            cwd: opts.cwd,
+            listeners: {
+                stdout: (chunk) => {
+                    nameStatusOut += chunk.toString();
+                },
+            },
+            silent: true,
+        });
+    }
+    catch {
+        // name-status failed but numstat succeeded — proceed with what we
+        // have. We lose rename detection (hasRename will be false when it
+        // might have been true), which means the lazy-reindex path may
+        // skip a rename PR. Acceptable: the user can always force the deep
+        // review with the `gitnexus-deep-review` label.
+        nameStatusOut = '';
+    }
+    return parseDiff(numstatOut, nameStatusOut);
 }
-async function uploadCoverage(opts) {
-    const form = new form_data_1.default();
-    form.append('prNumber', String(opts.prNumber));
-    form.append('commitSha', opts.commitSha);
-    form.append('format', opts.format ?? 'auto');
-    form.append('coverage', fs.createReadStream(opts.coveragePath));
-    const res = await axios_1.default.post(`${opts.hubUrl}/api/repos/${opts.repoId}/coverage`, form, {
-        headers: { ...form.getHeaders(), Authorization: `Bearer ${opts.token}` },
-        maxContentLength: 25 * 1024 * 1024,
-        maxBodyLength: 25 * 1024 * 1024,
-    });
-    return res.data;
+/**
+ * Parse `git diff --numstat` + `git diff --name-status` output into a
+ * normalised DiffStats object. Exported for testing — the live
+ * `computeDiffStats` calls this with real git output.
+ *
+ * Format:
+ *   numstat:      "<added>\t<deleted>\t<path>" (or "<a>\t<d>\t<old>\t<new>" for renames)
+ *                 binary files report "-\t-\t<path>"
+ *   name-status:  "<letter>\t<path>" (or "R<score>\t<old>\t<new>" for renames)
+ */
+function parseDiff(numstat, nameStatus) {
+    // Build a status lookup keyed by the new path. For renames we ALSO
+    // index by the old path so a numstat row that only lists one of the
+    // two (depending on git version) can still be matched.
+    const statusByPath = new Map();
+    for (const line of nameStatus.split('\n')) {
+        if (!line.trim())
+            continue;
+        const parts = line.split('\t');
+        const code = parts[0] ?? '';
+        if (code.startsWith('R') && parts.length >= 3) {
+            const oldPath = parts[1];
+            const newPath = parts[2];
+            statusByPath.set(newPath, { status: 'renamed', previousPath: oldPath });
+            statusByPath.set(oldPath, { status: 'renamed', previousPath: oldPath });
+        }
+        else if (parts.length >= 2) {
+            const status = mapStatusLetter(code);
+            statusByPath.set(parts[1], { status });
+        }
+    }
+    const files = [];
+    let totalAdded = 0;
+    let totalDeleted = 0;
+    let hasRename = false;
+    for (const line of numstat.split('\n')) {
+        if (!line.trim())
+            continue;
+        const parts = line.split('\t');
+        if (parts.length < 3)
+            continue;
+        // For renames numstat emits "<a>\t<d>\t<old>\t<new>" OR
+        // "<a>\t<d>\t{<old> => <new>}". We only handle the first form
+        // here; the second is suppressed by `-c diff.renames=true` style
+        // configs but we don't enforce it. If we see a 4-part row, that's
+        // a rename.
+        let path;
+        let previousPath;
+        if (parts.length === 4) {
+            previousPath = parts[2];
+            path = parts[3];
+        }
+        else {
+            path = parts[2];
+        }
+        const addedRaw = parts[0];
+        const deletedRaw = parts[1];
+        // Binary files: "-\t-\t<path>". Treat as 0/0 for line counts but
+        // include the file so callers see it.
+        const added = addedRaw === '-' ? 0 : Number(addedRaw);
+        const deleted = deletedRaw === '-' ? 0 : Number(deletedRaw);
+        const statusEntry = statusByPath.get(path) ?? statusByPath.get(previousPath ?? '');
+        let status;
+        if (statusEntry) {
+            status = statusEntry.status;
+            if (!previousPath && statusEntry.previousPath)
+                previousPath = statusEntry.previousPath;
+        }
+        else {
+            // Fall back to inferring from numstat shape: 4-part = rename,
+            // otherwise treat as modified (we can't reliably detect adds vs
+            // mods from numstat alone).
+            status = previousPath ? 'renamed' : 'modified';
+        }
+        if (status === 'renamed')
+            hasRename = true;
+        const file = { path, status, added, deleted };
+        if (previousPath)
+            file.previousPath = previousPath;
+        files.push(file);
+        totalAdded += Number.isFinite(added) ? added : 0;
+        totalDeleted += Number.isFinite(deleted) ? deleted : 0;
+    }
+    return {
+        files,
+        filesChanged: files.length,
+        linesAdded: totalAdded,
+        linesDeleted: totalDeleted,
+        hasRename,
+        isBigDiff: files.length > exports.BIG_DIFF_FILE_THRESHOLD,
+    };
+}
+function mapStatusLetter(letter) {
+    // Take only the first char — name-status sometimes appends a score
+    // (e.g. "R100", "C75").
+    const c = (letter[0] ?? '').toUpperCase();
+    switch (c) {
+        case 'A':
+            return 'added';
+        case 'D':
+            return 'removed';
+        case 'R':
+            return 'renamed';
+        case 'M':
+        default:
+            return 'modified';
+    }
+}
+/**
+ * Lazy-reindex decision. The action skips the reindex (and just calls
+ * /context-pack against the main-graph + raw diff) when:
+ *   - the user has NOT applied the deep-review label, AND
+ *   - the diff has no renames, AND
+ *   - the diff is below the file-count threshold.
+ *
+ * Anything else triggers a full reindex.
+ */
+function shouldReindex(diffStats, opts) {
+    if (!opts.lazyReindex)
+        return true;
+    if (opts.hasDeepReviewLabel)
+        return true;
+    if (diffStats.hasRename)
+        return true;
+    if (diffStats.isBigDiff)
+        return true;
+    return false;
 }
 
 
@@ -34737,206 +34761,321 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.main = main;
 const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
 const path = __importStar(__nccwpck_require__(6760));
 const os = __importStar(__nccwpck_require__(8161));
+const fs = __importStar(__nccwpck_require__(3024));
+const picocolors_1 = __importDefault(__nccwpck_require__(7336));
 const bundle_1 = __nccwpck_require__(7827);
 const upload_1 = __nccwpck_require__(1550);
-const coverage_1 = __nccwpck_require__(1713);
-const comment_1 = __nccwpck_require__(2246);
+const diff_1 = __nccwpck_require__(9952);
+const context_pack_1 = __nccwpck_require__(7096);
+const render_1 = __nccwpck_require__(7055);
+/**
+ * Phase 2 (Action — Claude-led prep) entrypoint.
+ *
+ * Flow:
+ *   1. Validate event + read inputs.
+ *   2. Resolve repoId on the Hub.
+ *   3. Compute diff stats locally (numstat + name-status).
+ *   4. Decide whether to reindex (lazy path skips for small diffs).
+ *   5. If reindexing: bundle HEAD, upload, poll status.
+ *   6. POST to /context-pack and receive Context Pack JSON.
+ *   7. Render artifacts (context-pack.json, system-prompt.md, MCP config).
+ *   8. Set step outputs for the Claude action step.
+ *
+ * Exit codes:
+ *   - 0 on success or known-skip paths (non-PR event).
+ *   - 1 on any unexpected error (core.setFailed).
+ */
 async function main() {
-    const hubUrl = core.getInput('hub-url');
+    // hub-url is required in action.yml — no fallback default. We strip
+    // any trailing slash so callers can pass `https://hub.gitnexus.io/`
+    // or `https://hub.gitnexus.io` interchangeably.
+    const hubUrl = core.getInput('hub-url', { required: true }).replace(/\/+$/, '');
     const token = core.getInput('token', { required: true });
-    const postComment = core.getInput('pr-comment') !== 'false';
+    const deepReviewLabel = core.getInput('deep-review-label') || 'gitnexus-deep-review';
+    const lazyReindexInput = (core.getInput('lazy-reindex') || 'true').toLowerCase();
+    const lazyReindex = lazyReindexInput !== 'false';
     const ctx = github.context;
-    if (ctx.eventName !== 'pull_request') {
-        core.warning(`Action only supports pull_request events, got ${ctx.eventName}`);
+    if (ctx.eventName !== 'pull_request' && ctx.eventName !== 'pull_request_target') {
+        core.warning(`gitnexus prep only runs on pull_request events; got "${ctx.eventName}". Skipping.`);
         return;
     }
     const pr = ctx.payload.pull_request;
     if (!pr) {
-        core.warning('pull_request payload missing');
+        core.warning('pull_request payload missing — skipping prep step.');
         return;
     }
     const prNumber = pr.number;
     const branchName = pr.head.ref;
     const headSha = pr.head.sha;
+    const baseSha = pr.base.sha;
+    const prUrl = pr.html_url ?? null;
     const repoFullName = `${ctx.repo.owner}/${ctx.repo.repo}`;
-    const repoId = await resolveRepoId({ hubUrl, token, fullName: repoFullName });
-    // Track per-stage timing for the dashboard's Pipeline Status table.
-    // Each stage records its duration + outcome so the comment can render
-    // a clear breakdown of where time went and what failed.
-    const pipeline = [];
-    let coverage;
-    // ── Stage: indexing (bundle + reindex + poll) ──
-    const tIndexStart = Date.now();
-    const bundlePath = path.join(os.tmpdir(), `gitnexus-pr-${prNumber}.bundle`);
-    core.info(`Creating bundle for ${headSha}`);
-    await (0, bundle_1.createBundle)({
-        ref: headSha,
-        branchName,
-        outPath: bundlePath,
+    const labels = Array.isArray(pr.labels)
+        ? pr.labels.map((l) => l.name ?? '').filter(Boolean)
+        : [];
+    const hasDeepReviewLabel = labels.includes(deepReviewLabel);
+    core.info(picocolors_1.default.bold(picocolors_1.default.cyan(`GitNexus prep — PR #${prNumber} (${repoFullName})`)));
+    core.info(`  branch: ${branchName}`);
+    core.info(`  head:   ${headSha}`);
+    core.info(`  base:   ${baseSha}`);
+    if (labels.length)
+        core.info(`  labels: ${labels.join(', ')}`);
+    // ── 1. Resolve repo on Hub ──
+    core.startGroup('Resolving repo on Hub');
+    const repoId = await (0, context_pack_1.resolveRepoId)({ hubUrl, token, fullName: repoFullName });
+    core.info(`  repoId = ${repoId}`);
+    core.endGroup();
+    // ── 2. Diff stats ──
+    core.startGroup('Computing diff stats');
+    const diffStats = await (0, diff_1.computeDiffStats)({
+        baseSha,
+        headSha,
         cwd: process.cwd(),
     });
-    core.info('Uploading bundle to Hub');
-    const reindex = await (0, upload_1.uploadBundle)({
+    core.info(`  files: ${diffStats.filesChanged}, +${diffStats.linesAdded}/-${diffStats.linesDeleted}, ` +
+        `rename: ${diffStats.hasRename}, big: ${diffStats.isBigDiff}`);
+    core.endGroup();
+    // ── 3. Decide reindex strategy ──
+    const reindex = (0, diff_1.shouldReindex)(diffStats, { hasDeepReviewLabel, lazyReindex });
+    core.info(reindex
+        ? picocolors_1.default.yellow(`  → full reindex (${!lazyReindex
+            ? 'lazy disabled'
+            : hasDeepReviewLabel
+                ? `label "${deepReviewLabel}" present`
+                : diffStats.hasRename
+                    ? 'diff contains rename'
+                    : 'big diff (>50 files)'})`)
+        : picocolors_1.default.green('  → lazy path — using main-graph + raw diff'));
+    let indexedCommit = null;
+    if (reindex) {
+        core.startGroup('Bundling + uploading PR head');
+        const bundlePath = path.join(os.tmpdir(), `gitnexus-pr-${prNumber}.bundle`);
+        await (0, bundle_1.createBundle)({
+            ref: headSha,
+            branchName,
+            outPath: bundlePath,
+            cwd: process.cwd(),
+        });
+        core.info(`  bundle: ${bundlePath}`);
+        const uploaded = await (0, upload_1.uploadBundle)({
+            hubUrl,
+            token,
+            repoId,
+            prNumber,
+            branchName,
+            bundlePath,
+        });
+        core.info(`  upload accepted (status=${uploaded.status})`);
+        const ready = await (0, upload_1.pollUntilReady)({
+            statusUrl: uploaded.statusUrl,
+            hubUrl,
+            token,
+        });
+        indexedCommit = ready.indexedCommit;
+        core.info(picocolors_1.default.green(`  indexed commit: ${indexedCommit}`));
+        // Best-effort cleanup of the local bundle file.
+        fs.rm(bundlePath, { force: true }, () => { });
+        core.endGroup();
+    }
+    // ── 4. Context Pack ──
+    core.startGroup('Fetching Context Pack from Hub');
+    // Always include diff.files. We only attach the raw diff when lazy
+    // (no reindex) AND the file list is non-empty — the Hub builder
+    // prefers the structured files list over the raw diff and only falls
+    // back to rawDiff when files is empty (e.g. fork PRs without base
+    // SHA access).
+    const contextPack = await (0, context_pack_1.fetchContextPack)({
         hubUrl,
         token,
         repoId,
-        prNumber,
-        branchName,
-        bundlePath,
+        request: {
+            prNumber,
+            headSha,
+            baseSha,
+            branch: branchName,
+            url: prUrl,
+            diff: {
+                files: diffStats.files,
+            },
+        },
     });
-    core.info('Waiting for indexing');
-    const ready = await (0, upload_1.pollUntilReady)({ statusUrl: reindex.statusUrl, hubUrl, token });
-    core.info(`Indexed commit: ${ready.indexedCommit}`);
-    pipeline.push({
-        name: 'Indexing',
-        status: 'success',
-        details: `\`${ready.indexedCommit.slice(0, 7)}\` indexed in ${((Date.now() - tIndexStart) / 1000).toFixed(1)}s`,
-    });
-    // ── Stage: coverage upload (optional) ──
-    const coverageInput = core.getInput('coverage-file') || undefined;
-    const coverageFormat = core.getInput('coverage-format') || 'auto';
-    const coveragePath = (0, coverage_1.findCoverageFile)(process.cwd(), coverageInput);
-    if (coveragePath) {
-        core.info(`Uploading coverage from ${coveragePath}`);
-        const tCovStart = Date.now();
-        try {
-            const upload = await (0, coverage_1.uploadCoverage)({
-                hubUrl,
-                token,
-                repoId,
-                prNumber,
-                commitSha: headSha,
-                coveragePath,
-                format: coverageFormat,
-            });
-            core.info(`Coverage uploaded: format=${upload.format}, files=${upload.filesCount}, hit=${upload.hitLinesCount}, missed=${upload.missedLinesCount}`);
-            pipeline.push({
-                name: 'Coverage',
-                status: 'success',
-                details: `${upload.format}, ${upload.filesCount} file${upload.filesCount === 1 ? '' : 's'} in ${((Date.now() - tCovStart) / 1000).toFixed(1)}s`,
-            });
-            // Single-metric (lines) coverage row for the dashboard. Multi-metric
-            // (branches/functions/statements) requires a richer parser response
-            // and the Hub returning per-metric aggregates — tracked separately.
-            coverage = [
-                {
-                    metric: 'Lines',
-                    covered: upload.hitLinesCount,
-                    total: upload.hitLinesCount + upload.missedLinesCount,
-                },
-            ];
-        }
-        catch (err) {
-            // Non-fatal — coverage-gap check just falls back to its no-op
-            // pass. We surface the error as a warning so the user can
-            // diagnose without the whole action failing.
-            const msg = err instanceof Error ? err.message : String(err);
-            core.warning(`Coverage upload failed: ${msg}`);
-            pipeline.push({
-                name: 'Coverage',
-                status: 'failure',
-                details: `upload failed: ${msg.slice(0, 60)}`,
-            });
-        }
-    }
-    else if (coverageInput) {
-        core.warning(`coverage-file input set to "${coverageInput}" but file not found — skipping`);
-        pipeline.push({
-            name: 'Coverage',
-            status: 'skipped',
-            details: `coverage-file: \`${coverageInput}\` not found`,
-        });
+    const warnings = Array.isArray(contextPack.warningsForClaude)
+        ? contextPack.warningsForClaude
+        : [];
+    if (warnings.length) {
+        core.info(picocolors_1.default.yellow(`  Context Pack warnings (${warnings.length}):`));
+        for (const w of warnings)
+            core.info(`    - ${w}`);
     }
     else {
-        core.info('No coverage file found in common paths — skipping (set coverage-file: to enable)');
-        pipeline.push({
-            name: 'Coverage',
-            status: 'skipped',
-            details: 'no coverage file detected — set `coverage-file` to enable',
-        });
+        core.info('  Context Pack received (no warnings).');
     }
-    // ── Stage: graph checks ──
-    core.info('Running check suite');
-    const tChecksStart = Date.now();
-    const suite = await (0, upload_1.runChecks)({ hubUrl, token, repoId, prNumber });
-    const failingCount = suite.checks.filter((c) => c.severity === 'fail').length;
-    pipeline.push({
-        name: 'Graph checks',
-        status: failingCount > 0 ? 'failure' : 'success',
-        details: `${suite.checks.length} checks ran in ${((Date.now() - tChecksStart) / 1000).toFixed(1)}s`,
-    });
-    const markdown = (0, comment_1.composeMarkdown)({
-        ...suite,
-        branch: branchName,
-        commitSha: headSha,
-        indexedCommit: ready.indexedCommit,
+    core.endGroup();
+    // ── 5. Render artifacts ──
+    core.startGroup('Writing artifacts');
+    const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
+    const rendered = (0, render_1.renderArtifacts)({
+        workspace,
+        contextPack,
+        hubUrl,
+        token,
         repoFullName,
-        // Phase 13: render per-check "Fix with Claude →" links only when the
-        // user has opted into the Claude workflow on this repo. The flag is
-        // sourced from the Hub's checks response (`repo.claudeEnabled`) so
-        // the action doesn't need a second round-trip.
-        claudeEnabled: suite.repo?.claudeEnabled === true,
-        pipeline,
-        coverage,
+        prNumber,
     });
-    core.setOutput('checks-json', JSON.stringify(suite.checks));
-    core.setOutput('summary-markdown', markdown);
-    if (postComment) {
-        // Pull from the `github-token` input first (defaults to `${{ github.token }}`
-        // in action.yml — auto-resolves to the workflow's GITHUB_TOKEN as long as
-        // the workflow has `permissions: pull-requests: write`). Fall back to the
-        // env var for back-compat with workflows pinned to older action versions.
-        const githubToken = core.getInput('github-token') || process.env.GITHUB_TOKEN;
-        if (!githubToken) {
-            core.warning('github-token input + GITHUB_TOKEN env both empty — skipping PR comment');
-        }
-        else {
-            const octokit = github.getOctokit(githubToken);
-            const { data: comments } = await octokit.rest.issues.listComments({
-                ...ctx.repo,
-                issue_number: prNumber,
-            });
-            const existing = (0, comment_1.findMarkerComment)(comments);
-            if (existing) {
-                await octokit.rest.issues.updateComment({
-                    ...ctx.repo,
-                    comment_id: existing.id,
-                    body: markdown,
-                });
-            }
-            else {
-                await octokit.rest.issues.createComment({
-                    ...ctx.repo,
-                    issue_number: prNumber,
-                    body: markdown,
-                });
-            }
-        }
+    core.info(`  context-pack.json  → ${rendered.contextPackPath}`);
+    core.info(`  system-prompt.md   → ${rendered.systemPromptPath}`);
+    core.info(`  gitnexus-mcp.json  → ${rendered.mcpConfigPath}`);
+    core.endGroup();
+    // ── 6. Step outputs ──
+    core.setOutput('context-pack-path', rendered.contextPackPath);
+    core.setOutput('system-prompt-path', rendered.systemPromptPath);
+    core.setOutput('mcp-config-path', rendered.mcpConfigPath);
+    if (indexedCommit)
+        core.setOutput('indexed-commit', indexedCommit);
+    core.info(picocolors_1.default.bold(picocolors_1.default.green('GitNexus prep complete.')));
+}
+main().catch((err) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    core.setFailed(`gitnexus prep failed: ${msg}`);
+});
+
+
+/***/ }),
+
+/***/ 7055:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
     }
-    const hasFail = suite.checks.some((c) => c.severity === 'fail');
-    if (hasFail)
-        core.setFailed('GitNexus checks failed');
-}
-async function resolveRepoId(opts) {
-    const axios = (await Promise.resolve().then(() => __importStar(__nccwpck_require__(7269)))).default;
-    const res = await axios.get(`${opts.hubUrl}/api/repos`, {
-        headers: { Authorization: `Bearer ${opts.token}` },
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.renderArtifacts = renderArtifacts;
+exports.applyPlaceholders = applyPlaceholders;
+exports.renderMcpConfig = renderMcpConfig;
+const fs = __importStar(__nccwpck_require__(3024));
+const path = __importStar(__nccwpck_require__(6760));
+function renderArtifacts(opts) {
+    const gitnexusDir = path.join(opts.workspace, '.gitnexus');
+    const claudeDir = path.join(opts.workspace, '.claude');
+    fs.mkdirSync(gitnexusDir, { recursive: true });
+    fs.mkdirSync(claudeDir, { recursive: true });
+    const contextPackPath = path.join(gitnexusDir, 'context-pack.json');
+    const systemPromptPath = path.join(gitnexusDir, 'system-prompt.md');
+    const mcpConfigPath = path.join(claudeDir, 'gitnexus-mcp.json');
+    fs.writeFileSync(contextPackPath, JSON.stringify(opts.contextPack, null, 2), 'utf8');
+    const promptTemplate = loadSystemPromptTemplate();
+    const renderedPrompt = applyPlaceholders(promptTemplate, {
+        CONTEXT_PACK_PATH: contextPackPath,
+        HUB_URL: opts.hubUrl,
+        REPO_FULL_NAME: opts.repoFullName,
+        PR_NUMBER: String(opts.prNumber),
     });
-    // The Hub returns `fullName` (camelCase); some older deployments
-    // returned `full_name` (snake_case). Accept both so the action keeps
-    // working against either response shape.
-    const repos = res.data.repos ?? res.data;
-    const match = repos.find((r) => r.fullName === opts.fullName || r.full_name === opts.fullName);
-    if (!match)
-        throw new Error(`repo ${opts.fullName} not registered on Hub`);
-    return match.id;
+    fs.writeFileSync(systemPromptPath, renderedPrompt, 'utf8');
+    const mcpConfig = renderMcpConfig({ hubUrl: opts.hubUrl, token: opts.token });
+    fs.writeFileSync(mcpConfigPath, mcpConfig, 'utf8');
+    return { contextPackPath, systemPromptPath, mcpConfigPath };
 }
-main().catch((e) => core.setFailed(String(e)));
+/**
+ * Substitute `{{KEY}}` markers in a template. Unknown markers are left
+ * intact so a malformed template fails at review time (visible in
+ * Claude's output) rather than silently dropping context.
+ */
+function applyPlaceholders(template, values) {
+    return template.replace(/\{\{(\w+)\}\}/g, (match, key) => {
+        return Object.prototype.hasOwnProperty.call(values, key) ? values[key] : match;
+    });
+}
+/**
+ * Build the .claude/gitnexus-mcp.json content. The Claude action
+ * accepts an HTTP MCP server config with a Bearer token in headers.
+ *
+ * We DO NOT inline the token in the system prompt — only here, in a
+ * file that Claude's MCP transport reads at startup. The system prompt
+ * stays scrub-safe for logs.
+ */
+function renderMcpConfig(opts) {
+    const config = {
+        mcpServers: {
+            gitnexus: {
+                type: 'http',
+                url: `${opts.hubUrl.replace(/\/+$/, '')}/mcp`,
+                headers: {
+                    Authorization: `Bearer ${opts.token}`,
+                },
+            },
+        },
+    };
+    return JSON.stringify(config, null, 2);
+}
+/**
+ * Locate and load the system-prompt template. ncc bundles src/main.ts
+ * into dist/index.js but does NOT copy non-JS assets, so the build
+ * script copies src/templates → dist/templates as a post-step. This
+ * function tries both shapes (ncc-shipped path and unbundled-source
+ * path) so vitest tests can run without a build.
+ *
+ * Override via `GITNEXUS_PROMPT_TEMPLATE_PATH` env var for tests that
+ * want to inject a custom template.
+ */
+function loadSystemPromptTemplate() {
+    const envOverride = process.env.GITNEXUS_PROMPT_TEMPLATE_PATH;
+    if (envOverride && fs.existsSync(envOverride)) {
+        return fs.readFileSync(envOverride, 'utf8');
+    }
+    const candidates = [
+        // Bundled (ncc dist/templates/system-prompt.md, sibling to dist/index.js).
+        path.join(__dirname, 'templates', 'system-prompt.md'),
+        // Source tree fallback (running tests with tsx / vitest).
+        path.join(__dirname, '..', 'src', 'templates', 'system-prompt.md'),
+    ];
+    for (const c of candidates) {
+        if (fs.existsSync(c))
+            return fs.readFileSync(c, 'utf8');
+    }
+    throw new Error(`system-prompt template not found. Tried: ${candidates.join(', ')}. ` +
+        `Set GITNEXUS_PROMPT_TEMPLATE_PATH to override.`);
+}
 
 
 /***/ }),
@@ -34985,7 +35124,6 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.uploadBundle = uploadBundle;
 exports.pollUntilReady = pollUntilReady;
-exports.runChecks = runChecks;
 const axios_1 = __importDefault(__nccwpck_require__(7269));
 const form_data_1 = __importDefault(__nccwpck_require__(6454));
 const fs = __importStar(__nccwpck_require__(3024));
@@ -34994,9 +35132,6 @@ async function uploadBundle(opts) {
     form.append('prNumber', String(opts.prNumber));
     form.append('branchName', opts.branchName);
     form.append('bundle', fs.createReadStream(opts.bundlePath));
-    // POST to the bundle-upload route specifically, distinct from the
-    // generic `/:id/reindex` which only triggers a re-clone and doesn't
-    // accept a bundle.
     const res = await axios_1.default.post(`${opts.hubUrl}/api/repos/${opts.repoId}/branch-reindex`, form, {
         headers: { ...form.getHeaders(), Authorization: `Bearer ${opts.token}` },
         maxContentLength: 100 * 1024 * 1024,
@@ -35004,8 +35139,15 @@ async function uploadBundle(opts) {
     });
     return res.data;
 }
+/**
+ * Poll the status URL until indexing is `ready` or `error`.
+ *
+ * pollIntervalMs is exposed so tests can run with 0 (fake-time loop)
+ * without sleeping for real.
+ */
 async function pollUntilReady(opts) {
     const timeout = opts.timeoutMs ?? 5 * 60_000;
+    const interval = opts.pollIntervalMs ?? 3000;
     const t0 = Date.now();
     while (Date.now() - t0 < timeout) {
         const res = await axios_1.default.get(`${opts.hubUrl}${opts.statusUrl}`, {
@@ -35015,13 +35157,9 @@ async function pollUntilReady(opts) {
             return { indexedCommit: res.data.indexedCommit };
         if (res.data.status === 'error')
             throw new Error(`indexing failed: ${res.data.error}`);
-        await new Promise((r) => setTimeout(r, 3000));
+        await new Promise((r) => setTimeout(r, interval));
     }
     throw new Error('indexing timed out');
-}
-async function runChecks(opts) {
-    const res = await axios_1.default.post(`${opts.hubUrl}/api/repos/${opts.repoId}/checks/${opts.prNumber}`, {}, { headers: { Authorization: `Bearer ${opts.token}` } });
-    return res.data;
 }
 
 

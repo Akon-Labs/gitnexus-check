@@ -1,2 +1,8 @@
 node_modules/
 lib/
+*.log
+.vitest/
+
+# Allow committing the ncc-built action bundle (root .gitignore excludes dist/).
+!dist/
+!dist/**
