@@ -102,8 +102,14 @@ Don't burn tokens re-fetching what's already in the pack.
 
 ## Output format
 
-Post **one** PR comment summarising your review. Use the GitHub PR comment API
-via the tool you have available. The comment must:
+Post **one** PR comment summarising your review using the
+**`mcp__github_comment__update_claude_comment`** tool — this is the only
+sanctioned way to post in this environment. Do NOT use `bash` / `gh pr
+comment` / file writes; the runner's permission sandbox blocks those and
+your review will be lost. The tool updates a pre-existing tracking
+comment so re-runs replace rather than spam.
+
+The comment must:
 
 1. Start with the marker comment so re-runs update rather than spam:
 
