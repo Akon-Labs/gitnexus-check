@@ -2,6 +2,9 @@ node_modules/
 lib/
 *.log
 .vitest/
+.env
+arch/
+.claude/
 
 # Allow committing the ncc-built action bundle (root .gitignore excludes dist/).
 !dist/
