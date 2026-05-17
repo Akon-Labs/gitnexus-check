@@ -11760,88 +11760,6 @@ function onceStrict (fn) {
 
 /***/ }),
 
-/***/ 7336:
-/***/ ((module) => {
-
-let p = process || {}, argv = p.argv || [], env = p.env || {}
-let isColorSupported =
-	!(!!env.NO_COLOR || argv.includes("--no-color")) &&
-	(!!env.FORCE_COLOR || argv.includes("--color") || p.platform === "win32" || ((p.stdout || {}).isTTY && env.TERM !== "dumb") || !!env.CI)
-
-let formatter = (open, close, replace = open) =>
-	input => {
-		let string = "" + input, index = string.indexOf(close, open.length)
-		return ~index ? open + replaceClose(string, close, replace, index) + close : open + string + close
-	}
-
-let replaceClose = (string, close, replace, index) => {
-	let result = "", cursor = 0
-	do {
-		result += string.substring(cursor, index) + replace
-		cursor = index + close.length
-		index = string.indexOf(close, cursor)
-	} while (~index)
-	return result + string.substring(cursor)
-}
-
-let createColors = (enabled = isColorSupported) => {
-	let f = enabled ? formatter : () => String
-	return {
-		isColorSupported: enabled,
-		reset: f("\x1b[0m", "\x1b[0m"),
-		bold: f("\x1b[1m", "\x1b[22m", "\x1b[22m\x1b[1m"),
-		dim: f("\x1b[2m", "\x1b[22m", "\x1b[22m\x1b[2m"),
-		italic: f("\x1b[3m", "\x1b[23m"),
-		underline: f("\x1b[4m", "\x1b[24m"),
-		inverse: f("\x1b[7m", "\x1b[27m"),
-		hidden: f("\x1b[8m", "\x1b[28m"),
-		strikethrough: f("\x1b[9m", "\x1b[29m"),
-
-		black: f("\x1b[30m", "\x1b[39m"),
-		red: f("\x1b[31m", "\x1b[39m"),
-		green: f("\x1b[32m", "\x1b[39m"),
-		yellow: f("\x1b[33m", "\x1b[39m"),
-		blue: f("\x1b[34m", "\x1b[39m"),
-		magenta: f("\x1b[35m", "\x1b[39m"),
-		cyan: f("\x1b[36m", "\x1b[39m"),
-		white: f("\x1b[37m", "\x1b[39m"),
-		gray: f("\x1b[90m", "\x1b[39m"),
-
-		bgBlack: f("\x1b[40m", "\x1b[49m"),
-		bgRed: f("\x1b[41m", "\x1b[49m"),
-		bgGreen: f("\x1b[42m", "\x1b[49m"),
-		bgYellow: f("\x1b[43m", "\x1b[49m"),
-		bgBlue: f("\x1b[44m", "\x1b[49m"),
-		bgMagenta: f("\x1b[45m", "\x1b[49m"),
-		bgCyan: f("\x1b[46m", "\x1b[49m"),
-		bgWhite: f("\x1b[47m", "\x1b[49m"),
-
-		blackBright: f("\x1b[90m", "\x1b[39m"),
-		redBright: f("\x1b[91m", "\x1b[39m"),
-		greenBright: f("\x1b[92m", "\x1b[39m"),
-		yellowBright: f("\x1b[93m", "\x1b[39m"),
-		blueBright: f("\x1b[94m", "\x1b[39m"),
-		magentaBright: f("\x1b[95m", "\x1b[39m"),
-		cyanBright: f("\x1b[96m", "\x1b[39m"),
-		whiteBright: f("\x1b[97m", "\x1b[39m"),
-
-		bgBlackBright: f("\x1b[100m", "\x1b[49m"),
-		bgRedBright: f("\x1b[101m", "\x1b[49m"),
-		bgGreenBright: f("\x1b[102m", "\x1b[49m"),
-		bgYellowBright: f("\x1b[103m", "\x1b[49m"),
-		bgBlueBright: f("\x1b[104m", "\x1b[49m"),
-		bgMagentaBright: f("\x1b[105m", "\x1b[49m"),
-		bgCyanBright: f("\x1b[106m", "\x1b[49m"),
-		bgWhiteBright: f("\x1b[107m", "\x1b[49m"),
-	}
-}
-
-module.exports = createColors()
-module.exports.createColors = createColors
-
-
-/***/ }),
-
 /***/ 770:
 /***/ ((module, __unused_webpack_exports, __nccwpck_require__) => {
 
@@ -34356,368 +34274,393 @@ function wrappy (fn, cb) {
 
 /***/ }),
 
-/***/ 7827:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+/***/ 6042:
+/***/ ((__unused_webpack_module, exports) => {
 
 "use strict";
 
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.createBundle = createBundle;
-const exec = __importStar(__nccwpck_require__(5236));
 /**
- * Create a git bundle containing the full history reachable from the
- * PR head, with a local branch ref so the Hub indexer can clone it
- * with `git clone --branch <branchName> <bundle>`.
- *
- * actions/checkout@v6 (with fetch-depth: 0) leaves the workdir with
- * the head SHA detached and the branch only available under
- * `refs/remotes/origin/<branchName>`. `git bundle create --all` would
- * then produce a bundle without `refs/heads/<branchName>`, so the
- * Hub's `git clone --branch` would fail with "Remote branch X not
- * found in upstream origin".
- *
- * Workaround: create a local heads ref pointing at the PR head SHA
- * before bundling. `git update-ref` is non-destructive (it doesn't
- * touch HEAD or the working tree, just creates the ref) and works
- * even when a branch with that name already exists.
- *
- * Earlier we tried `git bundle create <out> <bare-sha>` directly,
- * which fails with "Refusing to create empty bundle" because bundles
- * require ref-like revs to anchor commits. `--all` plus the manual
- * heads ref fixes both sides at once.
+ * @brief: Error-classification module. Converts an unknown error (axios
+ *         AxiosError, fetch Error, native Error, or arbitrary throw value)
+ *         into a stable user-visible string suitable for `core.error` +
+ *         `core.setFailed` in main.ts. Never inspects header values, never
+ *         dumps response bodies wholesale, and never returns the
+ *         GNX_TOKEN — GitHub's secret masker is a fallback, not a primary
+ *         defense.
  */
-async function createBundle(opts) {
-    await exec.exec('git', ['update-ref', `refs/heads/${opts.branchName}`, opts.ref], {
-        cwd: opts.cwd,
-    });
-    await exec.exec('git', ['bundle', 'create', opts.outPath, '--all'], { cwd: opts.cwd });
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.SchemaMismatchError = void 0;
+exports.classifyError = classifyError;
+/**
+ * @brief: Classify any thrown value into a single-line user-visible
+ *         message. The message is safe to log and safe to include in a
+ *         workflow summary — it never contains tokens, full URLs with
+ *         secrets, or unmodified response bodies.
+ *
+ * @params: (err: unknown)      -> Whatever was caught in main.ts.
+ * @params: (context: ErrorContext) -> 'hub' for GNX Hub calls, 'github' for Octokit calls.
+ *
+ * @returns: string — the user-visible failure reason.
+ */
+function classifyError(err, context) {
+    const axiosLike = asAxiosLike(err);
+    if (axiosLike) {
+        const status = axiosLike.response?.status;
+        const code = axiosLike.code;
+        if (code === 'ECONNABORTED' || code === 'ETIMEDOUT') {
+            return context === 'hub'
+                ? 'Hub request timed out. Check Hub availability.'
+                : 'GitHub request timed out. Try re-running the workflow.';
+        }
+        if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+            return context === 'hub'
+                ? 'Hub URL could not be resolved — check the `hub-url` input.'
+                : 'GitHub API host could not be resolved.';
+        }
+        if (status !== undefined) {
+            const fromStatus = classifyStatus(status, context, axiosLike);
+            if (fromStatus !== null)
+                return fromStatus;
+        }
+        if (isHtmlBody(axiosLike.response?.data)) {
+            return 'Hub returned HTML instead of JSON — hub-url may be wrong.';
+        }
+    }
+    if (err instanceof SchemaMismatchError) {
+        return 'Hub returned unexpected response shape. Action and Hub may be on incompatible versions.';
+    }
+    if (err instanceof Error) {
+        // Strip anything that looks like a token before returning.
+        return scrubMessage(err.message || 'unknown error');
+    }
+    return 'unknown error';
+}
+/**
+ * @brief: Distinct error type for shape-mismatches so main.ts can surface
+ *         the schema message uniformly. Thrown by hub-client when
+ *         isBlastResult / list-of-repos validation fails.
+ *
+ * @params: (message: string) -> Human-readable explanation for the throw site.
+ */
+class SchemaMismatchError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'SchemaMismatchError';
+    }
+}
+exports.SchemaMismatchError = SchemaMismatchError;
+function classifyStatus(status, context, err) {
+    // Hub-side classifications
+    if (context === 'hub') {
+        if (status === 401) {
+            return 'GNX_TOKEN is invalid or revoked. Regenerate at <hub>/profile.';
+        }
+        if (status === 402) {
+            return 'Plan limit exceeded — upgrade at <hub>/billing.';
+        }
+        if (status === 403) {
+            // Distinguish device-token fingerprint missing from generic forbidden
+            // by inspecting the (already-known-safe) response body shape.
+            const reason = readErrorReason(err.response?.data);
+            if (reason && reason.toLowerCase().includes('device-fingerprint')) {
+                return 'Hub requires X-Device-Fingerprint header for this token — Action build is incomplete.';
+            }
+            return 'GNX_TOKEN does not have access to the requested repo on the Hub.';
+        }
+        if (status === 404) {
+            const url = err.config?.url ?? '';
+            if (url.endsWith('/api/repos') || url.includes('/api/repos?')) {
+                return 'Hub /api/repos endpoint not found — hub-url may be wrong.';
+            }
+            // Discriminate: repo-not-registered (resolveRepoId path) vs blast endpoint absent
+            if (/\/prs\//.test(url)) {
+                return 'Hub blast endpoint not found — Action version may be incompatible with Hub.';
+            }
+            return 'Repo is not registered on the Hub. Link it at <hub>/repos.';
+        }
+        if (status === 429) {
+            const retryAfter = readRetryAfter(err.response?.headers);
+            return retryAfter
+                ? `Hub rate limit hit — retry after ${retryAfter} seconds.`
+                : 'Hub rate limit hit — retry shortly.';
+        }
+        if (status >= 500) {
+            return `Hub returned ${status}. Check Hub status.`;
+        }
+    }
+    // GitHub-side classifications
+    if (context === 'github') {
+        if (status === 401) {
+            return 'GITHUB_TOKEN is invalid — re-check the `github-token` input.';
+        }
+        if (status === 403) {
+            return 'Cannot post PR comment: missing pull-requests:write permission.';
+        }
+        if (status === 404) {
+            return 'GitHub returned 404 — PR or issue may not exist.';
+        }
+        if (status === 422) {
+            return 'Comment body rejected by GitHub (likely too large). Truncation failed — file an issue.';
+        }
+        if (status === 429) {
+            return 'GitHub API rate limit hit — retry after a few minutes.';
+        }
+        if (status >= 500) {
+            return `GitHub returned ${status}. Try re-running the workflow.`;
+        }
+    }
+    return null;
+}
+function asAxiosLike(err) {
+    if (!isObject(err))
+        return null;
+    const candidate = err;
+    // We treat anything carrying a `response` with numeric status as
+    // axios-shaped — fetch errors won't have it, and that's fine.
+    if (candidate.isAxiosError === true)
+        return candidate;
+    if (candidate.response && typeof candidate.response.status === 'number')
+        return candidate;
+    if (typeof candidate.code === 'string' && /^(ECONN|ETIM|EAI_|ENOT|EHOST)/.test(candidate.code)) {
+        return candidate;
+    }
+    return null;
+}
+function readErrorReason(data) {
+    if (!isObject(data))
+        return null;
+    const v = data.error;
+    return typeof v === 'string' ? v : null;
+}
+function isObject(v) {
+    return typeof v === 'object' && v !== null;
+}
+function readRetryAfter(headers) {
+    if (!headers)
+        return null;
+    // axios lowercases response header keys; tolerate both shapes.
+    const raw = headers['retry-after'] ?? headers['Retry-After'];
+    const value = Array.isArray(raw) ? raw[0] : raw;
+    if (!value)
+        return null;
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : null;
+}
+function isHtmlBody(data) {
+    if (typeof data !== 'string')
+        return false;
+    const trimmed = data.trim().slice(0, 40).toLowerCase();
+    return trimmed.startsWith('<!doctype html') || trimmed.startsWith('<html');
+}
+/**
+ * @brief: Strip anything that looks like a `gnx_` token from a message
+ *         before returning it. This is a fallback — call sites should
+ *         never produce token-containing messages — but it's cheap and
+ *         protects against future bugs.
+ *
+ * @params: (msg: string) -> Raw error message text.
+ *
+ * @returns: string — same message with any gnx_-prefixed substrings redacted.
+ */
+function scrubMessage(msg) {
+    return msg.replace(/gnx_[A-Za-z0-9_-]+/g, 'gnx_[redacted]');
 }
 
 
 /***/ }),
 
-/***/ 7096:
+/***/ 4162:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
 "use strict";
 
+/**
+ * @brief: Thin axios wrapper for the three GitNexus Hub endpoints the
+ *         Action talks to: list-repos (to resolve repoId from full name),
+ *         refresh-blast (to recompute on-demand), and get-blast (to read
+ *         the persisted result). All three use Bearer auth + a
+ *         X-Device-Fingerprint header that the Hub requires for `gnx_`
+ *         device tokens. The token value is passed via headers only and
+ *         is never echoed, logged, or embedded in error messages here.
+ */
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.fetchContextPack = fetchContextPack;
+exports.ACTION_DEVICE_FINGERPRINT = void 0;
+exports.validateHubUrl = validateHubUrl;
 exports.resolveRepoId = resolveRepoId;
+exports.refreshBlast = refreshBlast;
+exports.getBlast = getBlast;
 const axios_1 = __importDefault(__nccwpck_require__(7269));
-async function fetchContextPack(opts) {
-    const res = await axios_1.default.post(`${opts.hubUrl}/api/repos/${opts.repoId}/context-pack`, opts.request, {
-        headers: {
-            Authorization: `Bearer ${opts.token}`,
-            'Content-Type': 'application/json',
-        },
-        // Context Pack JSON is small — typically < 500KB even with full
-        // changedSymbols + cross-repo data. Bound the body to 5MB so a
-        // misbehaving Hub doesn't OOM the runner.
-        maxContentLength: 5 * 1024 * 1024,
-        maxBodyLength: 5 * 1024 * 1024,
-    });
-    return res.data;
+const blast_result_1 = __nccwpck_require__(5585);
+const classify_error_1 = __nccwpck_require__(6042);
+/**
+ * @brief: Fingerprint sent in `X-Device-Fingerprint` for every Hub call.
+ *         The Hub treats this string as opaque — its only purpose is to
+ *         identify the calling "device" alongside the device token.
+ */
+exports.ACTION_DEVICE_FINGERPRINT = 'gitnexus-check-action';
+const DEFAULT_TIMEOUT_MS = 60_000;
+const MAX_RESPONSE_BYTES = 5 * 1024 * 1024; // 5MB hard cap on JSON body
+/**
+ * @brief: Validate a URL string at the trust boundary. Rejects anything
+ *         not `https://` and strips at most one trailing slash so the
+ *         path-joining in callers can assume `${hubUrl}/api/...` shape.
+ *
+ * @params: (raw: string) -> Caller-supplied URL (already trim-slashed by main.ts).
+ *
+ * @returns: string — a normalised https URL without trailing slash.
+ * @throws: Error('hub-url must be https://...')
+ */
+function validateHubUrl(raw) {
+    const trimmed = raw.replace(/\/+$/, '');
+    if (!/^https:\/\//i.test(trimmed)) {
+        throw new Error('hub-url must be https:// — http:// is not supported');
+    }
+    return trimmed;
 }
 /**
- * Resolve the repo's UUID on the Hub from its full name. Mirrors v1
- * behaviour and tolerates both camelCase + snake_case shapes for back-
- * compat with older Hub deployments.
+ * @brief: Resolve a GitHub `owner/repo` full name to the Hub's UUID for
+ *         that repository. The Hub returns a bare array of repo objects
+ *         (not `{repos:[...]}`); we match by `fullName` (camelCase).
+ *
+ * @params: (opts.hubUrl: string)   -> Hub base URL without trailing slash.
+ * @params: (opts.token: string)    -> gnx_ device Bearer token.
+ * @params: (opts.fullName: string) -> Repository full name, e.g. "acme/widget".
+ *
+ * @returns: string — Hub repo id (UUID).
+ * @throws: Error('repo <name> not registered on Hub') when no match found.
+ * @throws: SchemaMismatchError when response is not an array of {id,fullName}.
+ * @call-routes: GET /api/repos
  */
 async function resolveRepoId(opts) {
+    if (!/^[\w.-]+\/[\w.-]+$/.test(opts.fullName)) {
+        throw new Error(`invalid repo full name: ${opts.fullName}`);
+    }
     const res = await axios_1.default.get(`${opts.hubUrl}/api/repos`, {
-        headers: { Authorization: `Bearer ${opts.token}` },
+        headers: hubHeaders(opts.token),
+        timeout: DEFAULT_TIMEOUT_MS,
+        maxContentLength: MAX_RESPONSE_BYTES,
+        maxBodyLength: MAX_RESPONSE_BYTES,
     });
-    const repos = res.data.repos ?? res.data;
-    const match = repos.find((r) => r.fullName === opts.fullName || r.full_name === opts.fullName);
-    if (!match)
+    const repos = parseRepoList(res);
+    const match = repos.find((r) => r.fullName === opts.fullName);
+    if (!match) {
         throw new Error(`repo ${opts.fullName} not registered on Hub`);
+    }
     return match.id;
 }
-
-
-/***/ }),
-
-/***/ 9952:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
-
-"use strict";
-
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.BIG_DIFF_FILE_THRESHOLD = void 0;
-exports.computeDiffStats = computeDiffStats;
-exports.parseDiff = parseDiff;
-exports.shouldReindex = shouldReindex;
-const exec = __importStar(__nccwpck_require__(5236));
 /**
- * Threshold above which we always run a full reindex. Mirrors the
- * design-doc default; keep this in sync with any Hub-side check.
- */
-exports.BIG_DIFF_FILE_THRESHOLD = 50;
-/**
- * Compute diff stats by shelling out to `git`. The runner has both
- * the head SHA checked out (via actions/checkout) and the base SHA
- * fetchable via `fetch-depth: 0`, so this is a local-only operation.
+ * @brief: Trigger a blast-radius recomputation for a single PR. The Hub
+ *         endpoint is synchronous as of 2026-05-17 (returns 200 with a
+ *         summary body), so no polling is needed. We discard the summary
+ *         body — callers fetch the full result via `getBlast` immediately
+ *         after this resolves.
  *
- * If git fails for any reason (e.g. shallow checkout, force-push that
- * orphaned the base SHA), we return an empty-files diff with `isBigDiff`
- * conservatively set to `true` so the action falls back to the safer
- * full-reindex path. The Hub side handles `files: []` gracefully.
+ * @params: (opts.hubUrl: string)   -> Hub base URL without trailing slash.
+ * @params: (opts.token: string)    -> gnx_ device Bearer token.
+ * @params: (opts.repoId: string)   -> Hub repo UUID from resolveRepoId.
+ * @params: (opts.prNumber: number) -> GitHub PR number to refresh.
+ *
+ * @returns: void
+ * @call-routes: POST /api/repos/:repoId/prs/:prNumber/refresh
  */
-async function computeDiffStats(opts) {
-    // numstat: per-file added/deleted counts (or `-` for binary).
-    // name-status: per-file status letter (A/M/D/R<score>).
-    // We run both in parallel-ish (sequential here because @actions/exec
-    // doesn't expose Promise.all-friendly streaming, but the cost is
-    // ms-level so it's not worth the extra plumbing).
-    // Run each git command in its own try/catch so partial output
-    // survives — if --numstat succeeds but --name-status fails we'd
-    // otherwise discard the valid line counts and force an unnecessary
-    // full reindex. With independent guards we keep what we got and
-    // simply lose rename detection on the second-cmd-fail path.
-    let numstatOut = '';
-    let nameStatusOut = '';
-    try {
-        await exec.exec('git', ['diff', '--numstat', `${opts.baseSha}..${opts.headSha}`], {
-            cwd: opts.cwd,
-            listeners: {
-                stdout: (chunk) => {
-                    numstatOut += chunk.toString();
-                },
-            },
-            silent: true,
-        });
+async function refreshBlast(opts) {
+    if (!/^[A-Za-z0-9-]+$/.test(opts.repoId)) {
+        throw new Error(`invalid repoId shape: ${opts.repoId}`);
     }
-    catch {
-        // numstat failed — we have nothing to derive from. Conservative
-        // fallback: assume big diff so we reindex rather than ship a wrong
-        // lazy decision.
-        return {
-            files: [],
-            filesChanged: 0,
-            linesAdded: 0,
-            linesDeleted: 0,
-            hasRename: false,
-            isBigDiff: true,
-        };
+    if (!Number.isInteger(opts.prNumber) || opts.prNumber <= 0) {
+        throw new Error(`invalid prNumber: ${String(opts.prNumber)}`);
     }
-    try {
-        await exec.exec('git', ['diff', '--name-status', `${opts.baseSha}..${opts.headSha}`], {
-            cwd: opts.cwd,
-            listeners: {
-                stdout: (chunk) => {
-                    nameStatusOut += chunk.toString();
-                },
-            },
-            silent: true,
-        });
-    }
-    catch {
-        // name-status failed but numstat succeeded — proceed with what we
-        // have. We lose rename detection (hasRename will be false when it
-        // might have been true), which means the lazy-reindex path may
-        // skip a rename PR. Acceptable: the user can always force the deep
-        // review with the `gitnexus-deep-review` label.
-        nameStatusOut = '';
-    }
-    return parseDiff(numstatOut, nameStatusOut);
+    await axios_1.default.post(`${opts.hubUrl}/api/repos/${opts.repoId}/prs/${opts.prNumber}/refresh`, {}, {
+        headers: hubHeaders(opts.token),
+        timeout: 5 * 60_000, // /refresh may run a full graph walk; allow 5min
+        maxContentLength: MAX_RESPONSE_BYTES,
+        maxBodyLength: MAX_RESPONSE_BYTES,
+    });
 }
 /**
- * Parse `git diff --numstat` + `git diff --name-status` output into a
- * normalised DiffStats object. Exported for testing — the live
- * `computeDiffStats` calls this with real git output.
+ * @brief: Fetch the persisted BlastResult for a PR. The Hub remaps
+ *         snake_case columns to camelCase at its boundary, so the body we
+ *         receive matches the BlastResult interface 1:1. We still run the
+ *         body through `isBlastResult` + `normalizeBlastResult` so the
+ *         renderer can iterate uniformly and the Action fails loud on
+ *         schema regressions.
  *
- * Format:
- *   numstat:      "<added>\t<deleted>\t<path>" (or "<a>\t<d>\t<old>\t<new>" for renames)
- *                 binary files report "-\t-\t<path>"
- *   name-status:  "<letter>\t<path>" (or "R<score>\t<old>\t<new>" for renames)
+ * @params: (opts.hubUrl: string)   -> Hub base URL without trailing slash.
+ * @params: (opts.token: string)    -> gnx_ device Bearer token.
+ * @params: (opts.repoId: string)   -> Hub repo UUID.
+ * @params: (opts.prNumber: number) -> GitHub PR number.
+ *
+ * @returns: BlastResult — normalised; all arrays guaranteed present.
+ * @throws: SchemaMismatchError when the body fails isBlastResult validation.
+ * @call-routes: GET /api/repos/:repoId/prs/:prNumber
  */
-function parseDiff(numstat, nameStatus) {
-    // Build a status lookup keyed by the new path. For renames we ALSO
-    // index by the old path so a numstat row that only lists one of the
-    // two (depending on git version) can still be matched.
-    const statusByPath = new Map();
-    for (const line of nameStatus.split('\n')) {
-        if (!line.trim())
-            continue;
-        const parts = line.split('\t');
-        const code = parts[0] ?? '';
-        if (code.startsWith('R') && parts.length >= 3) {
-            const oldPath = parts[1];
-            const newPath = parts[2];
-            statusByPath.set(newPath, { status: 'renamed', previousPath: oldPath });
-            statusByPath.set(oldPath, { status: 'renamed', previousPath: oldPath });
-        }
-        else if (parts.length >= 2) {
-            const status = mapStatusLetter(code);
-            statusByPath.set(parts[1], { status });
-        }
+async function getBlast(opts) {
+    if (!/^[A-Za-z0-9-]+$/.test(opts.repoId)) {
+        throw new Error(`invalid repoId shape: ${opts.repoId}`);
     }
-    const files = [];
-    let totalAdded = 0;
-    let totalDeleted = 0;
-    let hasRename = false;
-    for (const line of numstat.split('\n')) {
-        if (!line.trim())
-            continue;
-        const parts = line.split('\t');
-        if (parts.length < 3)
-            continue;
-        // For renames numstat emits "<a>\t<d>\t<old>\t<new>" OR
-        // "<a>\t<d>\t{<old> => <new>}". We only handle the first form
-        // here; the second is suppressed by `-c diff.renames=true` style
-        // configs but we don't enforce it. If we see a 4-part row, that's
-        // a rename.
-        let path;
-        let previousPath;
-        if (parts.length === 4) {
-            previousPath = parts[2];
-            path = parts[3];
-        }
-        else {
-            path = parts[2];
-        }
-        const addedRaw = parts[0];
-        const deletedRaw = parts[1];
-        // Binary files: "-\t-\t<path>". Treat as 0/0 for line counts but
-        // include the file so callers see it.
-        const added = addedRaw === '-' ? 0 : Number(addedRaw);
-        const deleted = deletedRaw === '-' ? 0 : Number(deletedRaw);
-        const statusEntry = statusByPath.get(path) ?? statusByPath.get(previousPath ?? '');
-        let status;
-        if (statusEntry) {
-            status = statusEntry.status;
-            if (!previousPath && statusEntry.previousPath)
-                previousPath = statusEntry.previousPath;
-        }
-        else {
-            // Fall back to inferring from numstat shape: 4-part = rename,
-            // otherwise treat as modified (we can't reliably detect adds vs
-            // mods from numstat alone).
-            status = previousPath ? 'renamed' : 'modified';
-        }
-        if (status === 'renamed')
-            hasRename = true;
-        const file = { path, status, added, deleted };
-        if (previousPath)
-            file.previousPath = previousPath;
-        files.push(file);
-        totalAdded += Number.isFinite(added) ? added : 0;
-        totalDeleted += Number.isFinite(deleted) ? deleted : 0;
+    if (!Number.isInteger(opts.prNumber) || opts.prNumber <= 0) {
+        throw new Error(`invalid prNumber: ${String(opts.prNumber)}`);
     }
+    const res = await axios_1.default.get(`${opts.hubUrl}/api/repos/${opts.repoId}/prs/${opts.prNumber}`, {
+        headers: hubHeaders(opts.token),
+        timeout: DEFAULT_TIMEOUT_MS,
+        maxContentLength: MAX_RESPONSE_BYTES,
+        maxBodyLength: MAX_RESPONSE_BYTES,
+    });
+    const body = res.data;
+    if (!(0, blast_result_1.isBlastResult)(body)) {
+        throw new classify_error_1.SchemaMismatchError('GET /prs/:n response failed isBlastResult');
+    }
+    return (0, blast_result_1.normalizeBlastResult)(body);
+}
+/**
+ * @brief: Build the header set every Hub call uses. Centralised so the
+ *         `X-Device-Fingerprint` requirement (added 2026-05 to the Hub for
+ *         gnx_ device tokens) cannot be forgotten in one call site.
+ *
+ * @params: (token: string) -> gnx_ device Bearer token.
+ *
+ * @returns: Record<string, string> — headers ready to spread into axios opts.
+ */
+function hubHeaders(token) {
     return {
-        files,
-        filesChanged: files.length,
-        linesAdded: totalAdded,
-        linesDeleted: totalDeleted,
-        hasRename,
-        isBigDiff: files.length > exports.BIG_DIFF_FILE_THRESHOLD,
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/json',
+        'X-Device-Fingerprint': exports.ACTION_DEVICE_FINGERPRINT,
     };
 }
-function mapStatusLetter(letter) {
-    // Take only the first char — name-status sometimes appends a score
-    // (e.g. "R100", "C75").
-    const c = (letter[0] ?? '').toUpperCase();
-    switch (c) {
-        case 'A':
-            return 'added';
-        case 'D':
-            return 'removed';
-        case 'R':
-            return 'renamed';
-        case 'M':
-        default:
-            return 'modified';
-    }
-}
 /**
- * Lazy-reindex decision. The action skips the reindex (and just calls
- * /context-pack against the main-graph + raw diff) when:
- *   - the user has NOT applied the deep-review label, AND
- *   - the diff has no renames, AND
- *   - the diff is below the file-count threshold.
- *
- * Anything else triggers a full reindex.
+ * @brief: Parse the GET /api/repos response into a typed list. Tolerates
+ *         both shapes the Hub has emitted over time: the modern bare
+ *         array, and the older `{ repos: [...] }` envelope.
  */
-function shouldReindex(diffStats, opts) {
-    if (!opts.lazyReindex)
-        return true;
-    if (opts.hasDeepReviewLabel)
-        return true;
-    if (diffStats.hasRename)
-        return true;
-    if (diffStats.isBigDiff)
-        return true;
-    return false;
+function parseRepoList(res) {
+    const data = res.data;
+    const raw = Array.isArray(data)
+        ? data
+        : isObject(data) && Array.isArray(data.repos)
+            ? data.repos
+            : null;
+    if (!raw) {
+        throw new classify_error_1.SchemaMismatchError('GET /api/repos: expected array or { repos: [] }');
+    }
+    const repos = [];
+    for (const entry of raw) {
+        if (!isObject(entry))
+            continue;
+        const id = entry.id;
+        const fullName = entry.fullName ?? entry.full_name;
+        if (typeof id === 'string' && typeof fullName === 'string') {
+            repos.push({ id, fullName });
+        }
+    }
+    return repos;
+}
+function isObject(v) {
+    return typeof v === 'object' && v !== null;
 }
 
 
@@ -34728,6 +34671,14 @@ function shouldReindex(diffStats, opts) {
 
 "use strict";
 
+/**
+ * @brief: gitnexus-check action entrypoint. Reads inputs, validates the
+ *         event, resolves the Hub repoId, refreshes + reads the blast
+ *         result, renders the PR comment, and posts (or updates) it. All
+ *         library calls throw on failure; this module is the only place
+ *         that touches `core.setFailed`. Token values never appear in any
+ *         log line, output, or error message produced from here.
+ */
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     var desc = Object.getOwnPropertyDescriptor(m, k);
@@ -34761,405 +34712,697 @@ var __importStar = (this && this.__importStar) || (function () {
         return result;
     };
 })();
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.main = main;
 const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
-const path = __importStar(__nccwpck_require__(6760));
-const os = __importStar(__nccwpck_require__(8161));
-const fs = __importStar(__nccwpck_require__(3024));
-const picocolors_1 = __importDefault(__nccwpck_require__(7336));
-const bundle_1 = __nccwpck_require__(7827);
-const upload_1 = __nccwpck_require__(1550);
-const diff_1 = __nccwpck_require__(9952);
-const context_pack_1 = __nccwpck_require__(7096);
-const render_1 = __nccwpck_require__(7055);
+const classify_error_1 = __nccwpck_require__(6042);
+const hub_client_1 = __nccwpck_require__(4162);
+const render_comment_1 = __nccwpck_require__(7323);
+const post_comment_1 = __nccwpck_require__(1229);
 /**
- * Phase 2 (Action — Claude-led prep) entrypoint.
+ * @brief: Top-level orchestration. Sequence:
+ *           1. Read inputs + validate event shape (non-PR → warn + exit 0).
+ *           2. resolveRepoId  → Hub UUID for owner/repo.
+ *           3. refreshBlast   → POST /refresh (synchronous on the live Hub).
+ *           4. getBlast       → GET /prs/:n; validated by isBlastResult.
+ *           5. renderComment  → markdown ≤ CHAR_BUDGET.
+ *           6. postOrUpdate   → Octokit upsert by marker.
+ *           7. setOutput      → comment-id, blast-level.
  *
- * Flow:
- *   1. Validate event + read inputs.
- *   2. Resolve repoId on the Hub.
- *   3. Compute diff stats locally (numstat + name-status).
- *   4. Decide whether to reindex (lazy path skips for small diffs).
- *   5. If reindexing: bundle HEAD, upload, poll status.
- *   6. POST to /context-pack and receive Context Pack JSON.
- *   7. Render artifacts (context-pack.json, system-prompt.md, MCP config).
- *   8. Set step outputs for the Claude action step.
+ *         Every Hub call wraps in try/catch → classifyError('hub'); every
+ *         GitHub call wraps similarly with 'github' context. On any thrown
+ *         classified message we call core.error + core.setFailed and
+ *         return — no further work after the first failure.
  *
- * Exit codes:
- *   - 0 on success or known-skip paths (non-PR event).
- *   - 1 on any unexpected error (core.setFailed).
+ * @returns: void — exits via core.setFailed on error or returns cleanly.
  */
 async function main() {
-    // hub-url is required in action.yml — no fallback default. We strip
-    // any trailing slash so callers can pass `https://hub.gitnexus.io/`
-    // or `https://hub.gitnexus.io` interchangeably.
-    const hubUrl = core.getInput('hub-url', { required: true }).replace(/\/+$/, '');
+    const hubUrl = (0, hub_client_1.validateHubUrl)(core.getInput('hub-url', { required: true }));
     const token = core.getInput('token', { required: true });
-    const deepReviewLabel = core.getInput('deep-review-label') || 'gitnexus-deep-review';
-    const lazyReindexInput = (core.getInput('lazy-reindex') || 'true').toLowerCase();
-    const lazyReindex = lazyReindexInput !== 'false';
+    const githubToken = core.getInput('github-token', { required: true });
     const ctx = github.context;
-    if (ctx.eventName !== 'pull_request' && ctx.eventName !== 'pull_request_target') {
-        core.warning(`gitnexus prep only runs on pull_request events; got "${ctx.eventName}". Skipping.`);
+    if (ctx.eventName !== 'pull_request') {
+        core.warning(`gitnexus-check runs on pull_request events; got "${ctx.eventName}". Skipping.`);
         return;
     }
     const pr = ctx.payload.pull_request;
-    if (!pr) {
-        core.warning('pull_request payload missing — skipping prep step.');
+    if (!pr || typeof pr.number !== 'number') {
+        core.warning('pull_request payload missing — skipping.');
         return;
     }
     const prNumber = pr.number;
-    const branchName = pr.head.ref;
-    const headSha = pr.head.sha;
-    const baseSha = pr.base.sha;
-    const prUrl = pr.html_url ?? null;
-    const repoFullName = `${ctx.repo.owner}/${ctx.repo.repo}`;
-    const labels = Array.isArray(pr.labels)
-        ? pr.labels.map((l) => l.name ?? '').filter(Boolean)
-        : [];
-    const hasDeepReviewLabel = labels.includes(deepReviewLabel);
-    core.info(picocolors_1.default.bold(picocolors_1.default.cyan(`GitNexus prep — PR #${prNumber} (${repoFullName})`)));
-    core.info(`  branch: ${branchName}`);
-    core.info(`  head:   ${headSha}`);
-    core.info(`  base:   ${baseSha}`);
-    if (labels.length)
-        core.info(`  labels: ${labels.join(', ')}`);
-    // ── 1. Resolve repo on Hub ──
-    core.startGroup('Resolving repo on Hub');
-    const repoId = await (0, context_pack_1.resolveRepoId)({ hubUrl, token, fullName: repoFullName });
-    core.info(`  repoId = ${repoId}`);
-    core.endGroup();
-    // ── 2. Diff stats ──
-    core.startGroup('Computing diff stats');
-    const diffStats = await (0, diff_1.computeDiffStats)({
-        baseSha,
-        headSha,
-        cwd: process.cwd(),
-    });
-    core.info(`  files: ${diffStats.filesChanged}, +${diffStats.linesAdded}/-${diffStats.linesDeleted}, ` +
-        `rename: ${diffStats.hasRename}, big: ${diffStats.isBigDiff}`);
-    core.endGroup();
-    // ── 3. Decide reindex strategy ──
-    const reindex = (0, diff_1.shouldReindex)(diffStats, { hasDeepReviewLabel, lazyReindex });
-    core.info(reindex
-        ? picocolors_1.default.yellow(`  → full reindex (${!lazyReindex
-            ? 'lazy disabled'
-            : hasDeepReviewLabel
-                ? `label "${deepReviewLabel}" present`
-                : diffStats.hasRename
-                    ? 'diff contains rename'
-                    : 'big diff (>50 files)'})`)
-        : picocolors_1.default.green('  → lazy path — using main-graph + raw diff'));
-    let indexedCommit = null;
-    if (reindex) {
-        core.startGroup('Bundling + uploading PR head');
-        const bundlePath = path.join(os.tmpdir(), `gitnexus-pr-${prNumber}.bundle`);
-        await (0, bundle_1.createBundle)({
-            ref: headSha,
-            branchName,
-            outPath: bundlePath,
-            cwd: process.cwd(),
-        });
-        core.info(`  bundle: ${bundlePath}`);
-        const uploaded = await (0, upload_1.uploadBundle)({
-            hubUrl,
-            token,
-            repoId,
+    const owner = ctx.repo.owner;
+    const repo = ctx.repo.repo;
+    const fullName = `${owner}/${repo}`;
+    core.info(`GitNexus Review — PR #${prNumber} (${fullName})`);
+    let repoId;
+    try {
+        repoId = await (0, hub_client_1.resolveRepoId)({ hubUrl, token, fullName });
+    }
+    catch (err) {
+        return fail(err, 'hub', 'resolveRepoId');
+    }
+    try {
+        await (0, hub_client_1.refreshBlast)({ hubUrl, token, repoId, prNumber });
+    }
+    catch (err) {
+        return fail(err, 'hub', 'refreshBlast');
+    }
+    let blast;
+    try {
+        blast = await (0, hub_client_1.getBlast)({ hubUrl, token, repoId, prNumber });
+    }
+    catch (err) {
+        return fail(err, 'hub', 'getBlast');
+    }
+    const body = (0, render_comment_1.renderComment)(blast, { prNumber, hubUrl });
+    let posted;
+    try {
+        const octokit = github.getOctokit(githubToken);
+        posted = await (0, post_comment_1.postOrUpdateComment)({
+            client: (0, post_comment_1.asIssueCommentsClient)(octokit),
+            owner,
+            repo,
             prNumber,
-            branchName,
-            bundlePath,
+            marker: render_comment_1.COMMENT_MARKER,
+            body,
         });
-        core.info(`  upload accepted (status=${uploaded.status})`);
-        const ready = await (0, upload_1.pollUntilReady)({
-            statusUrl: uploaded.statusUrl,
-            hubUrl,
-            token,
-        });
-        indexedCommit = ready.indexedCommit;
-        core.info(picocolors_1.default.green(`  indexed commit: ${indexedCommit}`));
-        // Best-effort cleanup of the local bundle file.
-        fs.rm(bundlePath, { force: true }, () => { });
-        core.endGroup();
     }
-    // ── 4. Context Pack ──
-    core.startGroup('Fetching Context Pack from Hub');
-    // Always include diff.files. We only attach the raw diff when lazy
-    // (no reindex) AND the file list is non-empty — the Hub builder
-    // prefers the structured files list over the raw diff and only falls
-    // back to rawDiff when files is empty (e.g. fork PRs without base
-    // SHA access).
-    const contextPack = await (0, context_pack_1.fetchContextPack)({
-        hubUrl,
-        token,
-        repoId,
-        request: {
-            prNumber,
-            headSha,
-            baseSha,
-            branch: branchName,
-            url: prUrl,
-            diff: {
-                files: diffStats.files,
-            },
-        },
-    });
-    const warnings = Array.isArray(contextPack.warningsForClaude)
-        ? contextPack.warningsForClaude
-        : [];
-    if (warnings.length) {
-        core.info(picocolors_1.default.yellow(`  Context Pack warnings (${warnings.length}):`));
-        for (const w of warnings)
-            core.info(`    - ${w}`);
+    catch (err) {
+        return fail(err, 'github', 'postOrUpdateComment');
     }
-    else {
-        core.info('  Context Pack received (no warnings).');
-    }
-    core.endGroup();
-    // ── 5. Render artifacts ──
-    core.startGroup('Writing artifacts');
-    const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
-    const rendered = (0, render_1.renderArtifacts)({
-        workspace,
-        contextPack,
-        hubUrl,
-        token,
-        repoFullName,
-        prNumber,
-    });
-    core.info(`  context-pack.json  → ${rendered.contextPackPath}`);
-    core.info(`  system-prompt.md   → ${rendered.systemPromptPath}`);
-    core.info(`  gitnexus-mcp.json  → ${rendered.mcpConfigPath}`);
-    core.endGroup();
-    // ── 6. Step outputs ──
-    core.setOutput('context-pack-path', rendered.contextPackPath);
-    core.setOutput('system-prompt-path', rendered.systemPromptPath);
-    core.setOutput('mcp-config-path', rendered.mcpConfigPath);
-    if (indexedCommit)
-        core.setOutput('indexed-commit', indexedCommit);
-    core.info(picocolors_1.default.bold(picocolors_1.default.green('GitNexus prep complete.')));
+    core.setOutput('comment-id', String(posted.commentId));
+    core.setOutput('blast-level', blast.blastLevel);
+    core.info(`Comment ${posted.action} (id=${posted.commentId}); blast=${blast.blastLevel}.`);
 }
-main().catch((err) => {
-    const msg = err instanceof Error ? err.message : String(err);
-    core.setFailed(`gitnexus prep failed: ${msg}`);
-});
+/**
+ * @brief: Translate any thrown value into a user-visible failure via
+ *         core.error + core.setFailed. Centralised so the orchestration
+ *         body stays readable and so there's a single audit trail for
+ *         token-safety: this function never receives the token value.
+ *
+ * @params: (err: unknown)                  -> Thrown value from a library call.
+ * @params: (context: 'hub' | 'github')     -> Which side raised the error.
+ * @params: (stage: string)                 -> Short stage label for the prefix.
+ */
+function fail(err, context, stage) {
+    const msg = (0, classify_error_1.classifyError)(err, context);
+    const line = `${stage}: ${msg}`;
+    core.error(line);
+    core.setFailed(line);
+}
+// Auto-run when invoked as the bundled action entrypoint. Tests import
+// the module to call `main` themselves; we suppress the auto-run under
+// VITEST so the import is side-effect-free in unit tests.
+if (process.env.VITEST !== 'true') {
+    main().catch((err) => {
+        // Last-resort guard: any synchronous throw before the try/catch chain
+        // (e.g. validateHubUrl, getInput failures) lands here. We must never
+        // leak the original error stack as it may contain header / config data.
+        const msg = (0, classify_error_1.classifyError)(err, 'hub');
+        core.setFailed(msg);
+    });
+}
 
 
 /***/ }),
 
-/***/ 7055:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+/***/ 1229:
+/***/ ((__unused_webpack_module, exports) => {
 
 "use strict";
 
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
+/**
+ * @brief: Octokit upsert for the PR comment carrying the v1 marker. We
+ *         paginate the issue-comments list, substring-match the marker,
+ *         and either PATCH the existing comment body or POST a new one.
+ *         Token handling: the GITHUB_TOKEN flows through `@actions/github`
+ *         via getOctokit and is never read, logged, or formatted here.
+ */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.renderArtifacts = renderArtifacts;
-exports.applyPlaceholders = applyPlaceholders;
-exports.renderMcpConfig = renderMcpConfig;
-const fs = __importStar(__nccwpck_require__(3024));
-const path = __importStar(__nccwpck_require__(6760));
-function renderArtifacts(opts) {
-    const gitnexusDir = path.join(opts.workspace, '.gitnexus');
-    const claudeDir = path.join(opts.workspace, '.claude');
-    fs.mkdirSync(gitnexusDir, { recursive: true });
-    fs.mkdirSync(claudeDir, { recursive: true });
-    const contextPackPath = path.join(gitnexusDir, 'context-pack.json');
-    const systemPromptPath = path.join(gitnexusDir, 'system-prompt.md');
-    const mcpConfigPath = path.join(claudeDir, 'gitnexus-mcp.json');
-    fs.writeFileSync(contextPackPath, JSON.stringify(opts.contextPack, null, 2), 'utf8');
-    const promptTemplate = loadSystemPromptTemplate();
-    const renderedPrompt = applyPlaceholders(promptTemplate, {
-        CONTEXT_PACK_PATH: contextPackPath,
-        HUB_URL: opts.hubUrl,
-        REPO_FULL_NAME: opts.repoFullName,
-        PR_NUMBER: String(opts.prNumber),
-    });
-    fs.writeFileSync(systemPromptPath, renderedPrompt, 'utf8');
-    const mcpConfig = renderMcpConfig({ hubUrl: opts.hubUrl, token: opts.token });
-    fs.writeFileSync(mcpConfigPath, mcpConfig, 'utf8');
-    return { contextPackPath, systemPromptPath, mcpConfigPath };
-}
+exports.postOrUpdateComment = postOrUpdateComment;
+exports.asIssueCommentsClient = asIssueCommentsClient;
+/** Cap on pages we'll scan before giving up and creating a new comment. */
+const MAX_PAGES = 10;
+const PER_PAGE = 100;
 /**
- * Substitute `{{KEY}}` markers in a template. Unknown markers are left
- * intact so a malformed template fails at review time (visible in
- * Claude's output) rather than silently dropping context.
- */
-function applyPlaceholders(template, values) {
-    return template.replace(/\{\{(\w+)\}\}/g, (match, key) => {
-        return Object.prototype.hasOwnProperty.call(values, key) ? values[key] : match;
-    });
-}
-/**
- * Build the .claude/gitnexus-mcp.json content. The Claude action
- * accepts an HTTP MCP server config with a Bearer token in headers.
+ * @brief: Idempotently post-or-update the PR comment identified by
+ *         `marker`. The marker must appear verbatim in the comment body
+ *         (typically as the first line). On finding a match we PATCH;
+ *         otherwise we POST a new one. Pagination terminates after
+ *         MAX_PAGES (1,000 comments) and falls through to creation —
+ *         realistically PRs do not have 1,000+ comments and the cap
+ *         protects against runaway loops on a degenerate repo.
  *
- * We DO NOT inline the token in the system prompt — only here, in a
- * file that Claude's MCP transport reads at startup. The system prompt
- * stays scrub-safe for logs.
+ * @params: (opts.client: IssueCommentsClient) -> Narrowed Octokit instance.
+ * @params: (opts.owner: string)               -> Repo owner login.
+ * @params: (opts.repo: string)                -> Repo name.
+ * @params: (opts.prNumber: number)            -> PR number (issue_number to GitHub).
+ * @params: (opts.marker: string)              -> Comment-identifying marker substring.
+ * @params: (opts.body: string)                -> Full rendered comment body.
+ *
+ * @returns: PostCommentResult — comment id and whether we created or updated.
+ * @call-routes: GET /repos/:owner/:repo/issues/:issue_number/comments (paginated)
+ * @call-routes: POST /repos/:owner/:repo/issues/:issue_number/comments
+ * @call-routes: PATCH /repos/:owner/:repo/issues/comments/:comment_id
  */
-function renderMcpConfig(opts) {
-    const config = {
-        mcpServers: {
-            gitnexus: {
-                type: 'http',
-                url: `${opts.hubUrl.replace(/\/+$/, '')}/mcp`,
-                headers: {
-                    Authorization: `Bearer ${opts.token}`,
-                },
+async function postOrUpdateComment(opts) {
+    validateInputs(opts);
+    const existingId = await findExistingCommentId(opts);
+    if (existingId !== null) {
+        const res = await opts.client.rest.issues.updateComment({
+            owner: opts.owner,
+            repo: opts.repo,
+            comment_id: existingId,
+            body: opts.body,
+        });
+        return { commentId: res.data.id, action: 'updated' };
+    }
+    const res = await opts.client.rest.issues.createComment({
+        owner: opts.owner,
+        repo: opts.repo,
+        issue_number: opts.prNumber,
+        body: opts.body,
+    });
+    return { commentId: res.data.id, action: 'created' };
+}
+/**
+ * @brief: Page through the PR's issue comments and return the id of the
+ *         first comment whose body contains `marker`. Returns null if no
+ *         match is found within MAX_PAGES.
+ */
+async function findExistingCommentId(opts) {
+    const iterator = opts.client.paginate.iterator('GET /repos/{owner}/{repo}/issues/{issue_number}/comments', {
+        owner: opts.owner,
+        repo: opts.repo,
+        issue_number: opts.prNumber,
+        per_page: PER_PAGE,
+    });
+    let pages = 0;
+    for await (const page of iterator) {
+        pages += 1;
+        for (const comment of page.data) {
+            if (typeof comment.body === 'string' && comment.body.includes(opts.marker)) {
+                return comment.id;
+            }
+        }
+        if (pages >= MAX_PAGES)
+            return null;
+    }
+    return null;
+}
+function validateInputs(opts) {
+    if (!/^[\w.-]+$/.test(opts.owner)) {
+        throw new Error(`invalid owner: ${opts.owner}`);
+    }
+    if (!/^[\w.-]+$/.test(opts.repo)) {
+        throw new Error(`invalid repo: ${opts.repo}`);
+    }
+    if (!Number.isInteger(opts.prNumber) || opts.prNumber <= 0) {
+        throw new Error(`invalid prNumber: ${String(opts.prNumber)}`);
+    }
+    if (!opts.marker)
+        throw new Error('marker must be non-empty');
+    if (!opts.body)
+        throw new Error('body must be non-empty');
+    if (!opts.body.includes(opts.marker)) {
+        throw new Error('body must contain marker — refusing to post unrecognisable comment');
+    }
+}
+/**
+ * @brief: Adapt a full Octokit instance (from `github.getOctokit`) into
+ *         the narrowed IssueCommentsClient shape. This indirection is
+ *         purely a type-safety boundary so `main.ts` is the only file
+ *         touching the broader Octokit surface; the comment poster
+ *         stays test-friendly with a hand-rolled mock.
+ *
+ * @params: (octokit: ReturnType<typeof github.getOctokit>) -> Auth'd Octokit.
+ *
+ * @returns: IssueCommentsClient — narrowed client for the poster to use.
+ */
+function asIssueCommentsClient(octokit) {
+    return {
+        paginate: {
+            iterator: (route, params) => octokit.paginate.iterator(route, params),
+        },
+        rest: {
+            issues: {
+                createComment: (params) => octokit.rest.issues.createComment(params),
+                updateComment: (params) => octokit.rest.issues.updateComment(params),
             },
         },
     };
-    return JSON.stringify(config, null, 2);
 }
+
+
+/***/ }),
+
+/***/ 7323:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
 /**
- * Locate and load the system-prompt template. ncc bundles src/main.ts
- * into dist/index.js but does NOT copy non-JS assets, so the build
- * script copies src/templates → dist/templates as a post-step. This
- * function tries both shapes (ncc-shipped path and unbundled-source
- * path) so vitest tests can run without a build.
- *
- * Override via `GITNEXUS_PROMPT_TEMPLATE_PATH` env var for tests that
- * want to inject a custom template.
+ * @brief: Pure markdown renderer for the PR comment body. Consumes a
+ *         normalised BlastResult (post-isBlastResult, post-normalize) and
+ *         emits a single string under CHAR_BUDGET. Performs progressive
+ *         truncation when over budget per v1-integration-plan.md §8. No
+ *         I/O, no `core.*`, no axios — this module is deterministic and
+ *         fully fixture-testable.
  */
-function loadSystemPromptTemplate() {
-    const envOverride = process.env.GITNEXUS_PROMPT_TEMPLATE_PATH;
-    if (envOverride && fs.existsSync(envOverride)) {
-        return fs.readFileSync(envOverride, 'utf8');
-    }
-    const candidates = [
-        // Bundled (ncc dist/templates/system-prompt.md, sibling to dist/index.js).
-        path.join(__dirname, 'templates', 'system-prompt.md'),
-        // Source tree fallback (running tests with tsx / vitest).
-        path.join(__dirname, '..', 'src', 'templates', 'system-prompt.md'),
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.CHAR_BUDGET = exports.COMMENT_MARKER = void 0;
+exports.renderComment = renderComment;
+/**
+ * @brief: HTML-comment marker that the poster searches for when deciding
+ *         whether to PATCH (update) or POST (create) the comment. Must
+ *         appear verbatim as the first line of every rendered body so the
+ *         substring scan in `post-comment.ts` is O(n) over comment count
+ *         rather than parsing markdown.
+ */
+exports.COMMENT_MARKER = '<!-- gitnexus-review-v1 -->';
+/**
+ * @brief: Maximum byte length (UTF-16 chars) of the rendered comment. The
+ *         GitHub hard cap is 65,536; this value leaves ~5,500-char
+ *         headroom for the marker, truncation footer, and any rounding
+ *         drift introduced by `Buffer.byteLength` vs `.length`.
+ */
+exports.CHAR_BUDGET = 60_000;
+const TOP_N_BLAST_LIST = 20;
+const TOP_N_MODULE_ROWS = 20;
+const TOP_N_SYMBOL_ROWS = 50;
+const TOP_N_RISK_FILES = 20;
+/**
+ * @brief: Render a BlastResult into the v1 comment markdown. Always starts
+ *         with COMMENT_MARKER. Sections are emitted only when their
+ *         underlying array is non-empty; otherwise the renderer falls
+ *         through to a single "no impact detected" sentence. When the
+ *         initial render exceeds CHAR_BUDGET, the function shrinks the
+ *         body in stages per v1-integration-plan.md §8 (drop details,
+ *         cap lists, drop sections) and appends a truncation footer.
+ *
+ * @params: (blast: BlastResult) -> Hub response, already validated and normalised.
+ * @params: (opts.prNumber: number) -> GitHub PR number for the heading.
+ * @params: (opts.hubUrl: string)   -> Hub base URL, used in the footer link.
+ *
+ * @returns: string — markdown body ≤ CHAR_BUDGET.
+ */
+function renderComment(blast, opts) {
+    // Render every variant once, then pick the smallest that fits.
+    // Stages are ordered most-detail → least-detail per the truncation plan.
+    const variants = [
+        () => buildBody(blast, opts, { detailLevel: 'full' }),
+        () => buildBody(blast, opts, { detailLevel: 'no-details' }),
+        () => buildBody(blast, opts, { detailLevel: 'capped' }),
+        () => buildBody(blast, opts, { detailLevel: 'minimal' }),
+        () => buildBody(blast, opts, { detailLevel: 'headline-only' }),
     ];
-    for (const c of candidates) {
-        if (fs.existsSync(c))
-            return fs.readFileSync(c, 'utf8');
+    for (const variant of variants) {
+        const body = variant();
+        if (body.length <= exports.CHAR_BUDGET)
+            return body;
     }
-    throw new Error(`system-prompt template not found. Tried: ${candidates.join(', ')}. ` +
-        `Set GITNEXUS_PROMPT_TEMPLATE_PATH to override.`);
+    // Even the headline variant blew the budget — clamp hard.
+    return variants[variants.length - 1]().slice(0, exports.CHAR_BUDGET);
+}
+/**
+ * @brief: Build the comment body at a given detail level. Internal — the
+ *         exported renderComment iterates this with progressively lower
+ *         detail until the result fits CHAR_BUDGET.
+ */
+function buildBody(blast, opts, cfg) {
+    const parts = [];
+    parts.push(exports.COMMENT_MARKER);
+    parts.push('');
+    parts.push(`## GitNexus Review — PR #${opts.prNumber}`);
+    parts.push('');
+    const headline = buildHeadline(blast);
+    if (headline) {
+        parts.push(`> ${headline}`);
+        parts.push('');
+    }
+    if (cfg.detailLevel === 'headline-only') {
+        appendFooter(parts, blast, opts.hubUrl, /* truncated */ true);
+        return parts.join('\n');
+    }
+    if (isEmptyBlast(blast)) {
+        parts.push('No symbol changes, blast radius, architecture impact, or API surface changes detected.');
+        parts.push('');
+        appendFooter(parts, blast, opts.hubUrl, false);
+        return parts.join('\n');
+    }
+    const renderedAny = appendSections(parts, blast, cfg.detailLevel);
+    if (!renderedAny) {
+        parts.push('No symbol changes, blast radius, architecture impact, or API surface changes detected.');
+        parts.push('');
+    }
+    appendFooter(parts, blast, opts.hubUrl, blast.truncated || cfg.detailLevel !== 'full');
+    return parts.join('\n');
+}
+/**
+ * @brief: Render the four signal sections in canonical order. Returns
+ *         true if at least one section was emitted, so the caller can
+ *         decide whether to fall back to the "no impact" sentence.
+ */
+function appendSections(parts, blast, detail) {
+    let rendered = false;
+    if (blast.affectedModules.length > 0) {
+        parts.push(renderArchitectureImpact(blast.affectedModules, detail));
+        parts.push('');
+        rendered = true;
+    }
+    if (detail !== 'minimal' && hasBlastRadius(blast)) {
+        parts.push(renderBlastRadius(blast, detail));
+        parts.push('');
+        rendered = true;
+    }
+    if (detail !== 'minimal' && blast.changedSymbols.length > 0) {
+        parts.push(renderSymbolChanges(blast.changedSymbols, detail));
+        parts.push('');
+        rendered = true;
+    }
+    if (detail !== 'minimal' && detail !== 'capped') {
+        const surface = projectApiSurface(blast.changedSymbols);
+        if (surface.length > 0) {
+            parts.push(renderApiSurfaceDelta(surface));
+            parts.push('');
+            rendered = true;
+        }
+    }
+    if (detail === 'full' && blast.riskFiles.length > 0) {
+        parts.push(renderRiskFiles(blast.riskFiles));
+        parts.push('');
+        rendered = true;
+    }
+    return rendered;
+}
+/**
+ * @brief: Single-line summary for the blockquote at the top. Empty string
+ *         when there's nothing to summarise (the renderer suppresses the
+ *         blockquote entirely in that case).
+ */
+function buildHeadline(blast) {
+    const bits = [];
+    bits.push(`Blast level: \`${blast.blastLevel}\``);
+    const total = blast.d1Symbols.length + blast.d2Symbols.length + blast.d3Symbols.length;
+    if (total > 0)
+        bits.push(`${total} dependent symbol${total === 1 ? '' : 's'}`);
+    if (blast.affectedModules.length > 0) {
+        const m = blast.affectedModules.length;
+        bits.push(`${m} module${m === 1 ? '' : 's'} touched`);
+    }
+    if (blast.stale)
+        bits.push('_(stale — re-run for fresh analysis)_');
+    return bits.join(' · ');
+}
+function isEmptyBlast(blast) {
+    return (blast.changedSymbols.length === 0 &&
+        blast.d1Symbols.length === 0 &&
+        blast.d2Symbols.length === 0 &&
+        blast.d3Symbols.length === 0 &&
+        blast.affectedModules.length === 0 &&
+        blast.riskFiles.length === 0);
+}
+function hasBlastRadius(blast) {
+    return (blast.d1Symbols.length > 0 || blast.d2Symbols.length > 0 || blast.d3Symbols.length > 0);
+}
+function renderArchitectureImpact(modules, detail) {
+    const cap = detail === 'capped' || detail === 'minimal' ? TOP_N_MODULE_ROWS : modules.length;
+    const sorted = [...modules].sort((a, b) => b.hits - a.hits);
+    const shown = sorted.slice(0, cap);
+    const rows = [];
+    rows.push('### Architecture Impact');
+    rows.push('');
+    rows.push('| Module | Hits | Direct |');
+    rows.push('|---|---|---|');
+    for (const m of shown) {
+        rows.push(`| \`${escapeCell(m.name)}\` | ${m.hits} | ${m.direct ? 'yes' : 'no'} |`);
+    }
+    if (sorted.length > shown.length) {
+        rows.push('');
+        rows.push(`_(${sorted.length - shown.length} more module${sorted.length - shown.length === 1 ? '' : 's'})_`);
+    }
+    return rows.join('\n');
+}
+function renderBlastRadius(blast, detail) {
+    const rows = [];
+    rows.push('### Blast Radius');
+    rows.push('');
+    rows.push('| Depth | Count |');
+    rows.push('|---|---|');
+    rows.push(`| d1 (direct)     | ${blast.d1Symbols.length} |`);
+    rows.push(`| d2 (indirect)   | ${blast.d2Symbols.length} |`);
+    rows.push(`| d3 (transitive) | ${blast.d3Symbols.length} |`);
+    if (detail === 'full') {
+        appendDetails(rows, 'Direct dependents (d1)', blast.d1Symbols);
+        appendDetails(rows, 'Indirect dependents (d2)', blast.d2Symbols);
+        appendDetails(rows, 'Transitive dependents (d3)', blast.d3Symbols);
+    }
+    return rows.join('\n');
+}
+function appendDetails(rows, summary, symbols) {
+    if (symbols.length === 0)
+        return;
+    const top = symbols.slice(0, TOP_N_BLAST_LIST);
+    rows.push('');
+    rows.push(`<details><summary>${summary}</summary>`);
+    rows.push('');
+    for (const s of top) {
+        const loc = formatLocation(s);
+        rows.push(`- ${loc} — \`${escapeCell(s.name)}\``);
+    }
+    if (symbols.length > top.length) {
+        rows.push(`- _(${symbols.length - top.length} more)_`);
+    }
+    rows.push('');
+    rows.push('</details>');
+}
+function renderSymbolChanges(symbols, detail) {
+    const cap = detail === 'capped' ? TOP_N_SYMBOL_ROWS : detail === 'minimal' ? 10 : symbols.length;
+    const shown = symbols.slice(0, cap);
+    const rows = [];
+    rows.push('### Symbol Changes');
+    rows.push('');
+    rows.push('| Kind | Symbol | Location |');
+    rows.push('|---|---|---|');
+    for (const s of shown) {
+        rows.push(`| ${escapeCell(s.type)} | \`${escapeCell(s.name)}\` | ${formatLocation(s)} |`);
+    }
+    if (symbols.length > shown.length) {
+        rows.push('');
+        rows.push(`_(${symbols.length - shown.length} more symbol${symbols.length - shown.length === 1 ? '' : 's'})_`);
+    }
+    return rows.join('\n');
+}
+/**
+ * @brief: Project changed symbols onto the API-surface subset. v1 has no
+ *         `change` field in the Hub response (the `pr_blast_results` shape
+ *         lacks per-symbol diff classification) so the projection is purely
+ *         a type-based filter: routes and exported declarations.
+ */
+function projectApiSurface(symbols) {
+    const surfaceTypes = new Set(['Route', 'Export']);
+    return symbols.filter((s) => surfaceTypes.has(s.type));
+}
+function renderApiSurfaceDelta(symbols) {
+    const rows = [];
+    rows.push('### API Surface Delta');
+    rows.push('');
+    rows.push('| Kind | Symbol | Location |');
+    rows.push('|---|---|---|');
+    for (const s of symbols) {
+        rows.push(`| ${escapeCell(s.type)} | \`${escapeCell(s.name)}\` | ${formatLocation(s)} |`);
+    }
+    return rows.join('\n');
+}
+function renderRiskFiles(riskFiles) {
+    const top = riskFiles.slice(0, TOP_N_RISK_FILES);
+    const rows = [];
+    rows.push('### File Risk');
+    rows.push('');
+    rows.push('| File | Risk | Status | Category |');
+    rows.push('|---|---|---|---|');
+    for (const f of top) {
+        rows.push(`| \`${escapeCell(f.path)}\` | ${f.risk} | ${escapeCell(f.status)} | ${escapeCell(f.category ?? '')} |`);
+    }
+    if (riskFiles.length > top.length) {
+        rows.push('');
+        rows.push(`_(${riskFiles.length - top.length} more file${riskFiles.length - top.length === 1 ? '' : 's'})_`);
+    }
+    return rows.join('\n');
+}
+function appendFooter(parts, blast, hubUrl, truncated) {
+    parts.push('---');
+    const bits = [];
+    bits.push(`blast level \`${blast.blastLevel}\``);
+    if (blast.fileRiskLevel)
+        bits.push(`file risk \`${blast.fileRiskLevel}\``);
+    bits.push(`computed \`${blast.computedAt}\``);
+    bits.push(`[GitNexus Hub](${hubUrl})`);
+    parts.push(`_${bits.join(' · ')}_`);
+    if (truncated) {
+        parts.push('');
+        parts.push('_Comment truncated — full results on the Hub._');
+    }
+}
+/**
+ * @brief: Format a SymbolRef location as `path:line` markdown code, with
+ *         the line suffix dropped when the symbol is file-level (the Hub
+ *         emits `startLine: null` for file-class entries).
+ */
+function formatLocation(symbol) {
+    const line = symbol.startLine;
+    const safePath = escapeCell(symbol.filePath);
+    return line == null ? `\`${safePath}\`` : `\`${safePath}:${line}\``;
+}
+/**
+ * @brief: Defensively escape characters that would break a markdown table
+ *         cell. The Hub-supplied strings (file paths, symbol names,
+ *         module names) are untrusted-input-ish in the security-model
+ *         sense — they come from the user's own repo but flow through our
+ *         renderer; we treat them conservatively.
+ */
+function escapeCell(value) {
+    return value.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 }
 
 
 /***/ }),
 
-/***/ 1550:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+/***/ 5585:
+/***/ ((__unused_webpack_module, exports) => {
 
 "use strict";
 
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-var __importDefault = (this && this.__importDefault) || function (mod) {
-    return (mod && mod.__esModule) ? mod : { "default": mod };
-};
+/**
+ * @brief: Typed view of the `pr_blast_results` shape returned by the Hub's
+ *         GET /api/repos/:repoId/prs/:prNumber endpoint. Field names are
+ *         camelCase — the Hub already remaps from snake_case columns at
+ *         its boundary, so this Action consumes them unchanged.
+ *
+ * @params: (blastLevel)      -> Overall risk level for the PR.
+ * @params: (changedSymbols)  -> Symbols whose definition changed in the diff.
+ * @params: (d1Symbols)       -> Direct dependents (depth-1 in the call graph).
+ * @params: (d2Symbols)       -> Indirect dependents (depth-2).
+ * @params: (d3Symbols)       -> Transitive dependents (depth-3).
+ * @params: (affectedFlows)   -> Execution flows touched by the change.
+ * @params: (affectedModules) -> Cluster-level summary; drives the "Architecture Impact" section.
+ * @params: (changedFiles)    -> Per-file change-status (added/modified/removed/renamed).
+ * @params: (fileRiskLevel)   -> File-class risk (security, build, etc.) — independent of blastLevel.
+ * @params: (riskFiles)       -> Per-file risk entries.
+ * @params: (graphData)       -> Force-directed graph payload used by the Hub UI; opaque to the Action.
+ * @params: (truncated)       -> Hub-side truncation marker.
+ * @params: (stale)           -> Computed against an older indexed commit than the current HEAD.
+ * @params: (prTitle/prAuthor/prBranch/prStatus) -> PR-level metadata; either party may set null.
+ * @params: (computedAt)      -> ISO timestamp when the Hub last computed the result.
+ */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.uploadBundle = uploadBundle;
-exports.pollUntilReady = pollUntilReady;
-const axios_1 = __importDefault(__nccwpck_require__(7269));
-const form_data_1 = __importDefault(__nccwpck_require__(6454));
-const fs = __importStar(__nccwpck_require__(3024));
-async function uploadBundle(opts) {
-    const form = new form_data_1.default();
-    form.append('prNumber', String(opts.prNumber));
-    form.append('branchName', opts.branchName);
-    form.append('bundle', fs.createReadStream(opts.bundlePath));
-    const res = await axios_1.default.post(`${opts.hubUrl}/api/repos/${opts.repoId}/branch-reindex`, form, {
-        headers: { ...form.getHeaders(), Authorization: `Bearer ${opts.token}` },
-        maxContentLength: 100 * 1024 * 1024,
-        maxBodyLength: 100 * 1024 * 1024,
-    });
-    return res.data;
+exports.isBlastResult = isBlastResult;
+exports.normalizeBlastResult = normalizeBlastResult;
+/**
+ * @brief: Validate that an unknown value matches the BlastResult shape we
+ *         expect from the Hub. Tolerates absent arrays (treats them as []
+ *         so callers iterate uniformly) and accepts unknown enum values
+ *         for `blastLevel` only when the shape is otherwise correct — the
+ *         caller is expected to default unrecognised values to `'LOW'`
+ *         at render time rather than throw here.
+ *
+ * @params: (value: unknown) -> The parsed JSON body returned by the Hub.
+ *
+ * @returns: boolean (TypeScript narrows to BlastResult on `true`).
+ */
+function isBlastResult(value) {
+    if (!isObject(value))
+        return false;
+    if (typeof value.blastLevel !== 'string')
+        return false;
+    if (typeof value.truncated !== 'boolean')
+        return false;
+    if (typeof value.computedAt !== 'string')
+        return false;
+    // stale + prStatus arrived later in the Hub schema; older deployments
+    // may omit them. Accept either shape so the Action keeps working across
+    // a window of Hub versions; renderer fills defaults.
+    if ('stale' in value && typeof value.stale !== 'boolean' && value.stale !== undefined) {
+        return false;
+    }
+    const arrayFields = [
+        'changedSymbols',
+        'd1Symbols',
+        'd2Symbols',
+        'd3Symbols',
+        'affectedFlows',
+        'affectedModules',
+        'changedFiles',
+        'riskFiles',
+    ];
+    for (const field of arrayFields) {
+        if (!(field in value))
+            continue;
+        const v = value[field];
+        if (v !== null && v !== undefined && !Array.isArray(v))
+            return false;
+    }
+    // fileRiskLevel may be null
+    if (value.fileRiskLevel !== null &&
+        value.fileRiskLevel !== undefined &&
+        typeof value.fileRiskLevel !== 'string') {
+        return false;
+    }
+    // graphData is optional in old Hub builds and always present in new ones.
+    if ('graphData' in value && value.graphData !== null && value.graphData !== undefined) {
+        if (!isObject(value.graphData))
+            return false;
+    }
+    return true;
 }
 /**
- * Poll the status URL until indexing is `ready` or `error`.
+ * @brief: Coerce a BlastResult-shaped object into a fully-populated
+ *         BlastResult by filling missing arrays with `[]`, normalising
+ *         optional nullable scalars, and clamping `blastLevel` to the
+ *         four known values (unknown → 'LOW' as a conservative default).
  *
- * pollIntervalMs is exposed so tests can run with 0 (fake-time loop)
- * without sleeping for real.
+ *         Call this AFTER `isBlastResult` has returned true. It exists so
+ *         the renderer never has to write `?? []` on every section.
+ *
+ * @params: (value: BlastResult) -> Hub response that has passed isBlastResult.
+ *
+ * @returns: BlastResult with all array fields present and blastLevel clamped.
  */
-async function pollUntilReady(opts) {
-    const timeout = opts.timeoutMs ?? 5 * 60_000;
-    const interval = opts.pollIntervalMs ?? 3000;
-    const t0 = Date.now();
-    while (Date.now() - t0 < timeout) {
-        const res = await axios_1.default.get(`${opts.hubUrl}${opts.statusUrl}`, {
-            headers: { Authorization: `Bearer ${opts.token}` },
-        });
-        if (res.data.status === 'ready')
-            return { indexedCommit: res.data.indexedCommit };
-        if (res.data.status === 'error')
-            throw new Error(`indexing failed: ${res.data.error}`);
-        await new Promise((r) => setTimeout(r, interval));
-    }
-    throw new Error('indexing timed out');
+function normalizeBlastResult(value) {
+    const level = clampBlastLevel(value.blastLevel);
+    return {
+        blastLevel: level,
+        changedSymbols: value.changedSymbols ?? [],
+        d1Symbols: value.d1Symbols ?? [],
+        d2Symbols: value.d2Symbols ?? [],
+        d3Symbols: value.d3Symbols ?? [],
+        affectedFlows: value.affectedFlows ?? [],
+        affectedModules: value.affectedModules ?? [],
+        changedFiles: value.changedFiles ?? [],
+        fileRiskLevel: clampOptionalBlastLevel(value.fileRiskLevel),
+        riskFiles: value.riskFiles ?? [],
+        graphData: value.graphData ?? { nodes: [], links: [] },
+        truncated: Boolean(value.truncated),
+        stale: Boolean(value.stale),
+        prTitle: value.prTitle ?? null,
+        prAuthor: value.prAuthor ?? null,
+        prBranch: value.prBranch ?? null,
+        prStatus: value.prStatus ?? null,
+        computedAt: value.computedAt,
+    };
+}
+function isObject(v) {
+    return typeof v === 'object' && v !== null;
+}
+function clampBlastLevel(v) {
+    return v === 'LOW' || v === 'MEDIUM' || v === 'HIGH' || v === 'CRITICAL' ? v : 'LOW';
+}
+function clampOptionalBlastLevel(v) {
+    if (v === null || v === undefined)
+        return null;
+    return v === 'LOW' || v === 'MEDIUM' || v === 'HIGH' || v === 'CRITICAL' ? v : null;
 }
 
 
@@ -35290,30 +35533,6 @@ module.exports = require("node:crypto");
 
 "use strict";
 module.exports = require("node:events");
-
-/***/ }),
-
-/***/ 3024:
-/***/ ((module) => {
-
-"use strict";
-module.exports = require("node:fs");
-
-/***/ }),
-
-/***/ 8161:
-/***/ ((module) => {
-
-"use strict";
-module.exports = require("node:os");
-
-/***/ }),
-
-/***/ 6760:
-/***/ ((module) => {
-
-"use strict";
-module.exports = require("node:path");
 
 /***/ }),
 

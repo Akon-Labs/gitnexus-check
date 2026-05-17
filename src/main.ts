@@ -1,204 +1,131 @@
+/**
+ * @brief: gitnexus-check action entrypoint. Reads inputs, validates the
+ *         event, resolves the Hub repoId, refreshes + reads the blast
+ *         result, renders the PR comment, and posts (or updates) it. All
+ *         library calls throw on failure; this module is the only place
+ *         that touches `core.setFailed`. Token values never appear in any
+ *         log line, output, or error message produced from here.
+ */
+
 import * as core from '@actions/core';
 import * as github from '@actions/github';
-import * as path from 'node:path';
-import * as os from 'node:os';
-import * as fs from 'node:fs';
-import pc from 'picocolors';
-import { createBundle } from './bundle';
-import { uploadBundle, pollUntilReady } from './upload';
-import { computeDiffStats, shouldReindex } from './diff';
-import { fetchContextPack, resolveRepoId } from './context-pack';
-import { renderArtifacts } from './render';
+import { classifyError } from './classify-error';
+import {
+  resolveRepoId,
+  refreshBlast,
+  getBlast,
+  validateHubUrl,
+} from './hub-client';
+import { renderComment, COMMENT_MARKER } from './render-comment';
+import { asIssueCommentsClient, postOrUpdateComment } from './post-comment';
 
 /**
- * Phase 2 (Action — Claude-led prep) entrypoint.
+ * @brief: Top-level orchestration. Sequence:
+ *           1. Read inputs + validate event shape (non-PR → warn + exit 0).
+ *           2. resolveRepoId  → Hub UUID for owner/repo.
+ *           3. refreshBlast   → POST /refresh (synchronous on the live Hub).
+ *           4. getBlast       → GET /prs/:n; validated by isBlastResult.
+ *           5. renderComment  → markdown ≤ CHAR_BUDGET.
+ *           6. postOrUpdate   → Octokit upsert by marker.
+ *           7. setOutput      → comment-id, blast-level.
  *
- * Flow:
- *   1. Validate event + read inputs.
- *   2. Resolve repoId on the Hub.
- *   3. Compute diff stats locally (numstat + name-status).
- *   4. Decide whether to reindex (lazy path skips for small diffs).
- *   5. If reindexing: bundle HEAD, upload, poll status.
- *   6. POST to /context-pack and receive Context Pack JSON.
- *   7. Render artifacts (context-pack.json, system-prompt.md, MCP config).
- *   8. Set step outputs for the Claude action step.
+ *         Every Hub call wraps in try/catch → classifyError('hub'); every
+ *         GitHub call wraps similarly with 'github' context. On any thrown
+ *         classified message we call core.error + core.setFailed and
+ *         return — no further work after the first failure.
  *
- * Exit codes:
- *   - 0 on success or known-skip paths (non-PR event).
- *   - 1 on any unexpected error (core.setFailed).
+ * @returns: void — exits via core.setFailed on error or returns cleanly.
  */
 export async function main(): Promise<void> {
-  // hub-url is required in action.yml — no fallback default. We strip
-  // any trailing slash so callers can pass `https://hub.gitnexus.io/`
-  // or `https://hub.gitnexus.io` interchangeably.
-  const hubUrl = core.getInput('hub-url', { required: true }).replace(/\/+$/, '');
+  const hubUrl = validateHubUrl(core.getInput('hub-url', { required: true }));
   const token = core.getInput('token', { required: true });
-  const deepReviewLabel = core.getInput('deep-review-label') || 'gitnexus-deep-review';
-  const lazyReindexInput = (core.getInput('lazy-reindex') || 'true').toLowerCase();
-  const lazyReindex = lazyReindexInput !== 'false';
+  const githubToken = core.getInput('github-token', { required: true });
 
   const ctx = github.context;
-  if (ctx.eventName !== 'pull_request' && ctx.eventName !== 'pull_request_target') {
-    core.warning(
-      `gitnexus prep only runs on pull_request events; got "${ctx.eventName}". Skipping.`,
-    );
+  if (ctx.eventName !== 'pull_request') {
+    core.warning(`gitnexus-check runs on pull_request events; got "${ctx.eventName}". Skipping.`);
     return;
   }
-
   const pr = ctx.payload.pull_request;
-  if (!pr) {
-    core.warning('pull_request payload missing — skipping prep step.');
+  if (!pr || typeof pr.number !== 'number') {
+    core.warning('pull_request payload missing — skipping.');
     return;
   }
-
   const prNumber: number = pr.number;
-  const branchName: string = pr.head.ref;
-  const headSha: string = pr.head.sha;
-  const baseSha: string = pr.base.sha;
-  const prUrl: string | null = pr.html_url ?? null;
-  const repoFullName = `${ctx.repo.owner}/${ctx.repo.repo}`;
-  const labels: string[] = Array.isArray(pr.labels)
-    ? pr.labels.map((l: { name?: string }) => l.name ?? '').filter(Boolean)
-    : [];
-  const hasDeepReviewLabel = labels.includes(deepReviewLabel);
+  const owner = ctx.repo.owner;
+  const repo = ctx.repo.repo;
+  const fullName = `${owner}/${repo}`;
 
-  core.info(pc.bold(pc.cyan(`GitNexus prep — PR #${prNumber} (${repoFullName})`)));
-  core.info(`  branch: ${branchName}`);
-  core.info(`  head:   ${headSha}`);
-  core.info(`  base:   ${baseSha}`);
-  if (labels.length) core.info(`  labels: ${labels.join(', ')}`);
+  core.info(`GitNexus Review — PR #${prNumber} (${fullName})`);
 
-  // ── 1. Resolve repo on Hub ──
-  core.startGroup('Resolving repo on Hub');
-  const repoId = await resolveRepoId({ hubUrl, token, fullName: repoFullName });
-  core.info(`  repoId = ${repoId}`);
-  core.endGroup();
-
-  // ── 2. Diff stats ──
-  core.startGroup('Computing diff stats');
-  const diffStats = await computeDiffStats({
-    baseSha,
-    headSha,
-    cwd: process.cwd(),
-  });
-  core.info(
-    `  files: ${diffStats.filesChanged}, +${diffStats.linesAdded}/-${diffStats.linesDeleted}, ` +
-      `rename: ${diffStats.hasRename}, big: ${diffStats.isBigDiff}`,
-  );
-  core.endGroup();
-
-  // ── 3. Decide reindex strategy ──
-  const reindex = shouldReindex(diffStats, { hasDeepReviewLabel, lazyReindex });
-  core.info(
-    reindex
-      ? pc.yellow(
-          `  → full reindex (${
-            !lazyReindex
-              ? 'lazy disabled'
-              : hasDeepReviewLabel
-                ? `label "${deepReviewLabel}" present`
-                : diffStats.hasRename
-                  ? 'diff contains rename'
-                  : 'big diff (>50 files)'
-          })`,
-        )
-      : pc.green('  → lazy path — using main-graph + raw diff'),
-  );
-
-  let indexedCommit: string | null = null;
-  if (reindex) {
-    core.startGroup('Bundling + uploading PR head');
-    const bundlePath = path.join(os.tmpdir(), `gitnexus-pr-${prNumber}.bundle`);
-    await createBundle({
-      ref: headSha,
-      branchName,
-      outPath: bundlePath,
-      cwd: process.cwd(),
-    });
-    core.info(`  bundle: ${bundlePath}`);
-
-    const uploaded = await uploadBundle({
-      hubUrl,
-      token,
-      repoId,
-      prNumber,
-      branchName,
-      bundlePath,
-    });
-    core.info(`  upload accepted (status=${uploaded.status})`);
-
-    const ready = await pollUntilReady({
-      statusUrl: uploaded.statusUrl,
-      hubUrl,
-      token,
-    });
-    indexedCommit = ready.indexedCommit;
-    core.info(pc.green(`  indexed commit: ${indexedCommit}`));
-
-    // Best-effort cleanup of the local bundle file.
-    fs.rm(bundlePath, { force: true }, () => {});
-    core.endGroup();
+  let repoId: string;
+  try {
+    repoId = await resolveRepoId({ hubUrl, token, fullName });
+  } catch (err) {
+    return fail(err, 'hub', 'resolveRepoId');
   }
 
-  // ── 4. Context Pack ──
-  core.startGroup('Fetching Context Pack from Hub');
-  // Always include diff.files. We only attach the raw diff when lazy
-  // (no reindex) AND the file list is non-empty — the Hub builder
-  // prefers the structured files list over the raw diff and only falls
-  // back to rawDiff when files is empty (e.g. fork PRs without base
-  // SHA access).
-  const contextPack = await fetchContextPack({
-    hubUrl,
-    token,
-    repoId,
-    request: {
-      prNumber,
-      headSha,
-      baseSha,
-      branch: branchName,
-      url: prUrl,
-      diff: {
-        files: diffStats.files,
-      },
-    },
-  });
-  const warnings = Array.isArray(contextPack.warningsForClaude)
-    ? contextPack.warningsForClaude
-    : [];
-  if (warnings.length) {
-    core.info(pc.yellow(`  Context Pack warnings (${warnings.length}):`));
-    for (const w of warnings) core.info(`    - ${w}`);
-  } else {
-    core.info('  Context Pack received (no warnings).');
+  try {
+    await refreshBlast({ hubUrl, token, repoId, prNumber });
+  } catch (err) {
+    return fail(err, 'hub', 'refreshBlast');
   }
-  core.endGroup();
 
-  // ── 5. Render artifacts ──
-  core.startGroup('Writing artifacts');
-  const workspace = process.env.GITHUB_WORKSPACE || process.cwd();
-  const rendered = renderArtifacts({
-    workspace,
-    contextPack,
-    hubUrl,
-    token,
-    repoFullName,
-    prNumber,
-  });
-  core.info(`  context-pack.json  → ${rendered.contextPackPath}`);
-  core.info(`  system-prompt.md   → ${rendered.systemPromptPath}`);
-  core.info(`  gitnexus-mcp.json  → ${rendered.mcpConfigPath}`);
-  core.endGroup();
+  let blast;
+  try {
+    blast = await getBlast({ hubUrl, token, repoId, prNumber });
+  } catch (err) {
+    return fail(err, 'hub', 'getBlast');
+  }
 
-  // ── 6. Step outputs ──
-  core.setOutput('context-pack-path', rendered.contextPackPath);
-  core.setOutput('system-prompt-path', rendered.systemPromptPath);
-  core.setOutput('mcp-config-path', rendered.mcpConfigPath);
-  if (indexedCommit) core.setOutput('indexed-commit', indexedCommit);
+  const body = renderComment(blast, { prNumber, hubUrl });
 
-  core.info(pc.bold(pc.green('GitNexus prep complete.')));
+  let posted;
+  try {
+    const octokit = github.getOctokit(githubToken);
+    posted = await postOrUpdateComment({
+      client: asIssueCommentsClient(octokit),
+      owner,
+      repo,
+      prNumber,
+      marker: COMMENT_MARKER,
+      body,
+    });
+  } catch (err) {
+    return fail(err, 'github', 'postOrUpdateComment');
+  }
+
+  core.setOutput('comment-id', String(posted.commentId));
+  core.setOutput('blast-level', blast.blastLevel);
+  core.info(`Comment ${posted.action} (id=${posted.commentId}); blast=${blast.blastLevel}.`);
 }
 
-main().catch((err) => {
-  const msg = err instanceof Error ? err.message : String(err);
-  core.setFailed(`gitnexus prep failed: ${msg}`);
-});
+/**
+ * @brief: Translate any thrown value into a user-visible failure via
+ *         core.error + core.setFailed. Centralised so the orchestration
+ *         body stays readable and so there's a single audit trail for
+ *         token-safety: this function never receives the token value.
+ *
+ * @params: (err: unknown)                  -> Thrown value from a library call.
+ * @params: (context: 'hub' | 'github')     -> Which side raised the error.
+ * @params: (stage: string)                 -> Short stage label for the prefix.
+ */
+function fail(err: unknown, context: 'hub' | 'github', stage: string): void {
+  const msg = classifyError(err, context);
+  const line = `${stage}: ${msg}`;
+  core.error(line);
+  core.setFailed(line);
+}
+
+// Auto-run when invoked as the bundled action entrypoint. Tests import
+// the module to call `main` themselves; we suppress the auto-run under
+// VITEST so the import is side-effect-free in unit tests.
+if (process.env.VITEST !== 'true') {
+  main().catch((err: unknown) => {
+    // Last-resort guard: any synchronous throw before the try/catch chain
+    // (e.g. validateHubUrl, getInput failures) lands here. We must never
+    // leak the original error stack as it may contain header / config data.
+    const msg = classifyError(err, 'hub');
+    core.setFailed(msg);
+  });
+}
