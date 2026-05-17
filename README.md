@@ -55,9 +55,14 @@ OpenCode
 gnx connect {GITNEXUS_TOKEN} --editor opencode
 ```
 
+
+## To get started
+1) Create a gitnexus.yml folder in your repo, and ensure the repo is indexed on either app.akonlabs.com or via the gitnexushub cli -> [Find out more here](https://akonlabs.com)
+2) Create PR on the branc specified in the list in `.github/workflows/gitnexus.yml`
+
 ## Example `.github/workflows/gitnexus.yml`
 
-```{yml}
+```yaml
 # managed by gitnexus-cli
 name: GitNexus
 
