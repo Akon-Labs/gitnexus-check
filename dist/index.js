@@ -35035,7 +35035,7 @@ function buildBody(blast, opts, cfg) {
     const parts = [];
     parts.push(exports.COMMENT_MARKER);
     parts.push('');
-    parts.push(`## GitNexus Review — PR #${opts.prNumber}`);
+    parts.push(`## GitNexus Review: PR #${opts.prNumber}`);
     parts.push('');
     const headline = buildHeadline(blast);
     if (headline) {

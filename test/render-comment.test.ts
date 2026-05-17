@@ -26,7 +26,7 @@ describe('renderComment — marker + heading', () => {
 
   it('includes the PR number heading', () => {
     const out = renderComment(loadBlast('blast-result-empty.json'), OPTS);
-    expect(out).toContain('## GitNexus Review — PR #42');
+    expect(out).toContain('## GitNexus Review: PR #42');
   });
 
   it('always includes a footer with the hub URL', () => {
