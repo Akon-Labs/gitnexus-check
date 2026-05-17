@@ -30,34 +30,34 @@ GNX_TOKEN can be Aquired [here](https://app.akonlabs.com/)
 
 ```bash
 npm install -g gitnexushub
-gnx connect {GNX_TOKEN} --editor {editor}
+gnx connect {GITNEXUS_TOKEN} --editor {editor}
 gnx install-ci
 ```
 
 --editor parameters
 Cursor
 ```bash
-gnx connect {GNX_TOKEN} --editor cursor
+gnx connect {GITNEXUS_TOKEN} --editor cursor
 ```
 
 Windsurf
 ```bash
-gnx connect {GNX_TOKEN} --editor windsurf
+gnx connect {GITNEXUS_TOKEN} --editor windsurf
 ```
 
 Claude Code
 ```bash
-gnx connect {GNX_TOKEN} --editor claude-code
+gnx connect {GITNEXUS_TOKEN} --editor claude-code
 ```
 
 OpenCode
 ```bash
-gnx connect {GNX_TOKEN} --editor opencode
+gnx connect {GITNEXUS_TOKEN} --editor opencode
 ```
 
 That writes `.github/workflows/gitnexus.yml` for you with everything filled in.
 
-Then add `GNX_TOKEN` as a repo secret in GitHub:
+Then add `GITNEXUS_TOKEN` as a repo secret in GitHub:
 
 **Settings → Secrets and variables → Actions → New repository secret**
 
