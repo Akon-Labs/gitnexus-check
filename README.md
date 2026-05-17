@@ -24,12 +24,35 @@ in place when you push more commits.
 - **API surface**: routes, exports, and signatures that moved (the stuff your consumers see).
 - **Architecture impact**: which modules of your codebase are touched, ranked by hit count.
 
+GNX_TOKEN can be Aquired [here](https://app.akonlabs.com/)
+
 ## How to use it
 
 ```bash
 npm install -g gitnexushub
-gnx connect {GNX_TOKEN}
+gnx connect {GNX_TOKEN} --editor {editor}
 gnx install-ci
+```
+
+--editor parameters
+Cursor
+```bash
+gnx connect {GNX_TOKEN} --editor cursor
+```
+
+Windsurf
+```bash
+gnx connect {GNX_TOKEN} --editor windsurf
+```
+
+Claude Code
+```bash
+gnx connect {GNX_TOKEN} --editor claude-code
+```
+
+OpenCode
+```bash
+gnx connect {GNX_TOKEN} --editor opencode
 ```
 
 That writes `.github/workflows/gitnexus.yml` for you with everything filled in.
