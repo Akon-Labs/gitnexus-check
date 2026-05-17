@@ -28,7 +28,7 @@ in place when you push more commits.
 
 ```bash
 npm install -g gitnexushub
-gnx login {GNX_TOKEN}
+gnx connect {GNX_TOKEN}
 gnx install-ci
 ```
 
