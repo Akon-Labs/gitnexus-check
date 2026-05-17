@@ -10,6 +10,7 @@
 
 ---
 
+
 ## What it is
 
 `gitnexus-check` runs on every PR, asks the GitNexus Hub what the change touches and
@@ -31,7 +32,6 @@ GNX_TOKEN can be Aquired [here](https://app.akonlabs.com/)
 ```bash
 npm install -g gitnexushub
 gnx connect {GITNEXUS_TOKEN} --editor {editor}
-gnx install-ci
 ```
 
 --editor parameters
@@ -55,6 +55,29 @@ OpenCode
 gnx connect {GITNEXUS_TOKEN} --editor opencode
 ```
 
+## Example `.github/workflows/gitnexus.yml`
+
+```{yml}
+# managed by gitnexus-cli
+name: GitNexus
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: Akon-Labs/gitnexus-check@staging
+        with:
+          hub-url: https://gitnexus-enterprise-production.up.railway.app
+          token: ${{ secrets.GITNEXUS_TOKEN }}
+
 That writes `.github/workflows/gitnexus.yml` for you with everything filled in.
 
 Then add `GITNEXUS_TOKEN` as a repo secret in GitHub:
@@ -65,7 +88,10 @@ Generate the token from your profile at [akonlabs.com](https://akonlabs.com), pa
 save. Open a PR and the comment shows up.
 
 ## Build and test (contributors)
+```
 
+
+## Development and Contributing
 ```bash
 npm install
 npm run lint        # type-check
