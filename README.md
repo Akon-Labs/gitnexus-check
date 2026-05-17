@@ -6,8 +6,6 @@
 
 **A GitHub Action that posts a graph-aware review comment on every pull request.**
 
-Built by [Akon Labs](https://akonlabs.com), powered by [GitNexus](https://github.com/abhigyanpatwari/GitNexus).
-
 </div>
 
 ---
