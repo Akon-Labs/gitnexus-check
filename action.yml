@@ -3,10 +3,10 @@ description: 'Posts a GitNexus blast-radius review comment on the PR by calling 
 author: 'Akon Labs'
 inputs:
   hub-url:
-    description: 'GitNexus Hub base URL (e.g. https://app.akonlabs.com). Required — no default so users cannot accidentally hit a wrong server.'
+    description: 'GitNexus Hub base URL (e.g. https://app.akonlabs.com). Required, no default, so users cannot accidentally hit a wrong server.'
     required: true
   token:
-    description: 'GitNexus CI token (gnx_…). Store as ${{ secrets.GNX_TOKEN }} in the consumer repo.'
+    description: 'GitNexus CI token (gnx_...). Store as a repo secret (e.g. GITNEXUS_TOKEN) and pass via the workflow.'
     required: true
   github-token:
     description: 'GitHub token used to post the PR comment. Defaults to the auto-issued workflow token.'
