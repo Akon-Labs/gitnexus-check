@@ -29,9 +29,10 @@ describe('renderComment — marker + heading', () => {
     expect(out).toContain('GitNexus Review · PR #42');
   });
 
-  it('always includes a footer with the hub URL', () => {
+  it('does not render the metadata footer line', () => {
     const out = renderComment(loadBlast('blast-result-full.json'), OPTS);
-    expect(out).toContain('https://hub.example.com');
+    expect(out).not.toContain('GitNexus Hub');
+    expect(out).not.toContain('computed `');
   });
 });
 
@@ -76,6 +77,13 @@ describe('renderComment — full fixture (real Hub response)', () => {
     expect(out).toContain('<details><summary>Direct dependents (d1)</summary>');
     expect(out).toContain('`create-invite.ts`');
   });
+
+  it('groups sections into intent buckets, "What changed" before "What it affects"', () => {
+    const out = renderComment(loadBlast('blast-result-full.json'), OPTS);
+    expect(out).toContain('## What changed');
+    expect(out).toContain('## What it affects');
+    expect(out.indexOf('## What changed')).toBeLessThan(out.indexOf('## What it affects'));
+  });
 });
 
 describe('renderComment — truncated fixture (with Route + Export)', () => {
@@ -83,11 +91,6 @@ describe('renderComment — truncated fixture (with Route + Export)', () => {
     const out = renderComment(loadBlast('blast-result-truncated.json'), OPTS);
     expect(out).toContain('### API Surface Delta');
     expect(out).toContain('POST /invoices/:id/void');
-  });
-
-  it('appends a truncation footer when blast.truncated is true', () => {
-    const out = renderComment(loadBlast('blast-result-truncated.json'), OPTS);
-    expect(out).toContain('Comment truncated');
   });
 });
 
@@ -139,9 +142,9 @@ describe('renderComment — char budget', () => {
     expect(out.length).toBeLessThanOrEqual(CHAR_BUDGET);
   });
 
-  it('emits the truncation footer when shrinking down to fit', () => {
+  it('never emits a truncation footer', () => {
     const out = renderComment(bigBlast(5_000), OPTS);
-    expect(out).toContain('Comment truncated');
+    expect(out).not.toContain('Comment truncated');
   });
 
   it('full fixture fits comfortably under budget', () => {
@@ -153,7 +156,7 @@ describe('renderComment — char budget', () => {
 describe('renderComment — affected flows', () => {
   it('renders the Affected Flows table from the flows fixture, sorted by hits desc', () => {
     const out = renderComment(loadBlast('blast-result-flows.json'), OPTS);
-    expect(out).toContain('### Affected Flows');
+    expect(out).toContain('Affected Flows');
     expect(out).toContain('| Process | Hits |');
     expect(out).toContain('| Indexing Queue Lifecycle | 7 |');
     expect(out).toContain('| Invite Issuance | 3 |');
@@ -230,7 +233,7 @@ describe('renderComment — affected flows', () => {
       computedAt: '2026-05-17T00:00:00.000Z',
     });
     const out = renderComment(blast, OPTS);
-    expect(out).toContain('### Affected Flows');
+    expect(out).toContain('Affected Flows');
     expect(out).toContain('more flow');
   });
 });
@@ -374,6 +377,74 @@ describe('renderComment — verdict', () => {
     const out = renderComment(blast, OPTS);
     expect(out.length).toBeLessThanOrEqual(CHAR_BUDGET);
     expect(out).toContain('Blast level: `CRITICAL`');
+  });
+});
+
+describe('renderComment — recommendations', () => {
+  function elevatedBlast(level: BlastResult['blastLevel']): BlastResult {
+    const d1: SymbolRef[] = [];
+    for (let i = 0; i < 20; i++) {
+      d1.push({ id: `d${i}`, name: `dep${i}`, type: 'Function', filePath: `src/x${i}.ts`, startLine: 1, endLine: 2 });
+    }
+    const changed: SymbolRef[] = [];
+    for (let i = 0; i < 9; i++) {
+      changed.push({ id: `c${i}`, name: `fn${i}`, type: 'Function', filePath: 'src/hot.ts', startLine: i, endLine: i + 1 });
+    }
+    const flows = [];
+    for (let i = 0; i < 6; i++) flows.push({ processName: `Flow ${i}`, hitCount: i });
+    return normalizeBlastResult({
+      blastLevel: level,
+      changedSymbols: changed,
+      d1Symbols: d1,
+      d2Symbols: [],
+      d3Symbols: [],
+      affectedFlows: flows,
+      affectedModules: [
+        { name: 'A', hits: 5, direct: true },
+        { name: 'B', hits: 3, direct: true },
+        { name: 'C', hits: 1, direct: false },
+      ],
+      changedFiles: [],
+      fileRiskLevel: null,
+      riskFiles: [],
+      graphData: { nodes: [], links: [] },
+      truncated: false,
+      stale: false,
+      prTitle: null,
+      prAuthor: null,
+      prBranch: null,
+      prStatus: null,
+      computedAt: '2026-05-17T00:00:00.000Z',
+    });
+  }
+
+  it('emits actionable, data-derived tips for a CRITICAL PR', () => {
+    const out = renderComment(elevatedBlast('CRITICAL'), OPTS);
+    expect(out).toContain('## How to reduce the blast radius');
+    expect(out).toContain('20 direct dependents');
+    expect(out).toContain('module'); // spans-modules tip
+    expect(out).toContain('execution flows');
+    expect(out).toContain('`src/hot.ts` concentrates 9 changed symbols');
+  });
+
+  it('shows recommendations for HIGH and MEDIUM as well', () => {
+    expect(renderComment(elevatedBlast('HIGH'), OPTS)).toContain(
+      '## How to reduce the blast radius',
+    );
+    expect(renderComment(elevatedBlast('MEDIUM'), OPTS)).toContain(
+      '## How to reduce the blast radius',
+    );
+  });
+
+  it('omits recommendations for LOW', () => {
+    const low = renderComment(elevatedBlast('LOW'), OPTS);
+    expect(low).not.toContain('How to reduce the blast radius');
+  });
+
+  it('caps the tips so it does not become a dump', () => {
+    const out = renderComment(elevatedBlast('CRITICAL'), OPTS);
+    const tipCount = (out.match(/^- \*\*/gm) ?? []).length;
+    expect(tipCount).toBeLessThanOrEqual(4);
   });
 });
 

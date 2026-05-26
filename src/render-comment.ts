@@ -34,15 +34,6 @@ export const COMMENT_MARKER = '<!-- gitnexus-review-v1 -->';
  */
 export const CHAR_BUDGET = 60_000;
 
-/**
- * @brief: Absolute URL for the Akon Labs logo shown in the comment header.
- *         The comment lands in the *consumer's* repo, so a relative path
- *         would not resolve — we pin a raw URL at `HEAD` (the default
- *         branch of this Action's repo, where the asset is committed).
- */
-const LOGO_URL =
-  'https://raw.githubusercontent.com/Akon-Labs/gitnexus-check/HEAD/.github/assets/akonlabs-logo.png';
-
 const TOP_N_BLAST_LIST = 20;
 const TOP_N_MODULE_ROWS = 20;
 const TOP_N_SYMBOL_ROWS = 50;
@@ -112,7 +103,6 @@ function buildBody(
   }
 
   if (cfg.detailLevel === 'headline-only') {
-    appendFooter(parts, blast, opts.hubUrl, /* truncated */ true);
     return parts.join('\n');
   }
 
@@ -132,7 +122,6 @@ function buildBody(
       );
       parts.push('');
     }
-    appendFooter(parts, blast, opts.hubUrl, false);
     return parts.join('\n');
   }
 
@@ -148,12 +137,12 @@ function buildBody(
     );
     parts.push('');
   }
-  appendFooter(
-    parts,
-    blast,
-    opts.hubUrl,
-    blast.truncated || cfg.detailLevel !== 'full',
-  );
+
+  const recommendations = renderRecommendations(blast);
+  if (recommendations) {
+    parts.push(recommendations);
+    parts.push('');
+  }
   return parts.join('\n');
 }
 
@@ -166,8 +155,6 @@ function buildBody(
 function renderHeader(prNumber: number): string {
   return [
     '<div align="center">',
-    '',
-    `<img src="${LOGO_URL}" alt="Akon Labs" width="88" />`,
     '',
     `### GitNexus Review · PR #${prNumber}`,
     '',
@@ -193,11 +180,14 @@ function renderSummaryStrip(blast: BlastResult): string {
 }
 
 /**
- * @brief: Render the signal sections in canonical order. Long, skimmable
- *         lists (Symbol Changes, Changed Files, File Risk) are wrapped in
- *         collapsible <details> so the comment stays scannable. Returns
- *         true if at least one section was emitted, so the caller can
- *         decide whether to fall back to the "no impact" sentence.
+ * @brief: Render the signal sections grouped into three reviewer-intent
+ *         buckets — "What changed" (the PR's own edits), "What it affects"
+ *         (downstream impact), and "What to check" (risk/follow-ups). Each
+ *         bucket header is emitted only when it has at least one section.
+ *         Long lists (Symbol Changes, Changed Files, Affected Flows, File
+ *         Risk) are wrapped in collapsible <details> so the comment reads
+ *         as a review rather than a flat dump. Returns true if any bucket
+ *         rendered, so the caller can fall back to the "no impact" sentence.
  */
 function appendSections(
   parts: string[],
@@ -205,57 +195,75 @@ function appendSections(
   detail: DetailLevel,
 ): boolean {
   let rendered = false;
-  if (blast.affectedModules.length > 0) {
-    parts.push(renderArchitectureImpact(blast.affectedModules, detail));
-    parts.push('');
-    rendered = true;
-  }
-  if (detail !== 'minimal' && blast.affectedFlows.length > 0) {
-    parts.push(renderAffectedFlows(blast.affectedFlows, detail));
-    parts.push('');
-    rendered = true;
-  }
-  if (detail !== 'minimal' && hasBlastRadius(blast)) {
-    parts.push(renderBlastRadius(blast, detail));
-    parts.push('');
-    rendered = true;
-  }
+
+  // ── What changed: the PR's own edits ──
+  const changed: string[] = [];
   if (detail !== 'minimal' && blast.changedSymbols.length > 0) {
-    parts.push(
+    changed.push(
       detailsBlock(
         `Symbol Changes (${blast.changedSymbols.length})`,
         renderSymbolChanges(blast.changedSymbols, detail),
       ),
     );
-    parts.push('');
-    rendered = true;
-  }
-  if (detail !== 'minimal' && detail !== 'capped') {
-    const surface = projectApiSurface(blast.changedSymbols);
-    if (surface.length > 0) {
-      parts.push(renderApiSurfaceDelta(surface));
-      parts.push('');
-      rendered = true;
-    }
   }
   if (detail !== 'minimal' && blast.changedFiles.length > 0) {
-    parts.push(
+    changed.push(
       detailsBlock(
         `Changed Files (${blast.changedFiles.length})`,
         renderChangedFiles(blast.changedFiles, detail),
       ),
     );
-    parts.push('');
-    rendered = true;
   }
+  rendered = appendBucket(parts, 'What changed', changed) || rendered;
+
+  // ── What it affects: downstream impact ──
+  const affects: string[] = [];
+  if (blast.affectedModules.length > 0) {
+    affects.push(renderArchitectureImpact(blast.affectedModules, detail));
+  }
+  if (detail !== 'minimal' && blast.affectedFlows.length > 0) {
+    affects.push(
+      detailsBlock(
+        `Affected Flows (${blast.affectedFlows.length})`,
+        renderAffectedFlows(blast.affectedFlows, detail),
+      ),
+    );
+  }
+  if (detail !== 'minimal' && hasBlastRadius(blast)) {
+    affects.push(renderBlastRadius(blast, detail));
+  }
+  if (detail !== 'minimal' && detail !== 'capped') {
+    const surface = projectApiSurface(blast.changedSymbols);
+    if (surface.length > 0) affects.push(renderApiSurfaceDelta(surface));
+  }
+  rendered = appendBucket(parts, 'What it affects', affects) || rendered;
+
+  // ── What to check: risk / follow-ups ──
+  const check: string[] = [];
   if (detail === 'full' && blast.riskFiles.length > 0) {
-    parts.push(
+    check.push(
       detailsBlock(`File Risk (${blast.riskFiles.length})`, renderRiskFiles(blast.riskFiles)),
     );
-    parts.push('');
-    rendered = true;
   }
+  rendered = appendBucket(parts, 'What to check', check) || rendered;
+
   return rendered;
+}
+
+/**
+ * @brief: Emit a `## <title>` bucket and its sections, but only when the
+ *         bucket has at least one section. Returns whether anything was
+ *         emitted so the caller can track overall rendered state.
+ */
+function appendBucket(parts: string[], title: string, sections: string[]): boolean {
+  if (sections.length === 0) return false;
+  parts.push(`## ${title}`);
+  parts.push('');
+  for (const section of sections) {
+    parts.push(section);
+    parts.push('');
+  }
+  return true;
 }
 
 /**
@@ -391,15 +399,14 @@ function renderArchitectureImpact(modules: AffectedModule[], detail: DetailLevel
  *         first defined string of processName, name, or processId, falling
  *         back to '(unnamed flow)'; every Hub string is run through
  *         escapeCell (§6.1). Rows are capped at TOP_N_FLOW_ROWS at the
- *         capped detail level with a `_(N more)_` trailer.
+ *         capped detail level with a `_(N more)_` trailer. No section
+ *         header — the caller wraps it in a collapsible block.
  */
 function renderAffectedFlows(flows: AffectedFlow[], detail: DetailLevel): string {
   const cap = detail === 'capped' ? TOP_N_FLOW_ROWS : flows.length;
   const sorted = [...flows].sort((a, b) => flowHits(b) - flowHits(a));
   const shown = sorted.slice(0, cap);
   const rows: string[] = [];
-  rows.push('### Affected Flows');
-  rows.push('');
   rows.push('| Process | Hits |');
   rows.push('|---|--:|');
   for (const f of shown) {
@@ -555,23 +562,86 @@ function renderRiskFiles(riskFiles: RiskFile[]): string {
   return rows.join('\n');
 }
 
-function appendFooter(
-  parts: string[],
-  blast: BlastResult,
-  hubUrl: string,
-  truncated: boolean,
-): void {
-  parts.push('---');
-  const bits: string[] = [];
-  bits.push(`blast level \`${blast.blastLevel}\``);
-  if (blast.fileRiskLevel) bits.push(`file risk \`${blast.fileRiskLevel}\``);
-  bits.push(`computed \`${blast.computedAt}\``);
-  bits.push(`<a href="${hubUrl}">GitNexus Hub</a>`);
-  parts.push(`<sub>${bits.join(' · ')}</sub>`);
-  if (truncated) {
-    parts.push('');
-    parts.push('<sub>_Comment truncated — full results on the Hub._</sub>');
+/**
+ * @brief: Deterministic, no-LLM guidance for shrinking the blast radius,
+ *         shown for any elevated PR (MEDIUM and above; LOW is skipped).
+ *         Each bullet is gated on a threshold over data already in the
+ *         comment (direct dependents, modules spanned, flows reached, the
+ *         hottest changed file, risky non-code files, PR size); the section
+ *         is omitted entirely when no rule fires. Bullets are capped so the
+ *         section stays actionable, not another dump. Returns '' when there
+ *         is nothing to recommend.
+ *
+ * @params: (blast: BlastResult) -> Normalised Hub result.
+ * @returns: string — the markdown section, or '' when not applicable.
+ */
+function renderRecommendations(blast: BlastResult): string {
+  if (blast.blastLevel === 'LOW') return '';
+  const tips: string[] = [];
+
+  const d1 = blast.d1Symbols.length;
+  if (d1 >= 15) {
+    tips.push(
+      `**${d1} direct dependents.** The changed symbols are widely called — keep changes backwards-compatible (additive over breaking). If a signature must change, add a thin wrapper that preserves the old one so callers don't all need updating in this PR.`,
+    );
   }
+
+  const moduleCount = blast.affectedModules.length;
+  const directModules = blast.affectedModules.filter((m) => m.direct).length;
+  if (moduleCount >= 3 || directModules >= 2) {
+    tips.push(
+      `**Spans ${moduleCount} module${moduleCount === 1 ? '' : 's'}.** Consider splitting this PR along module lines so each change reviews and ships with a contained blast radius.`,
+    );
+  }
+
+  const flows = blast.affectedFlows.length;
+  if (flows >= 5) {
+    tips.push(
+      `**Reaches ${flows} execution flows.** Gate the change behind a feature flag or stage the rollout so a regression can't hit every flow at once.`,
+    );
+  }
+
+  const hot = hottestFile(blast.changedSymbols);
+  if (hot && hot.count >= 8) {
+    tips.push(
+      `**\`${escapeCell(hot.path)}\` concentrates ${hot.count} changed symbols.** Splitting this file (or carving it out of this PR) shrinks how much one change can break.`,
+    );
+  }
+
+  const risky = blast.riskFiles.filter((f) => f.risk === 'HIGH' || f.risk === 'CRITICAL');
+  if (risky.length > 0) {
+    const names = risky.slice(0, 3).map((f) => `\`${escapeCell(f.path)}\``).join(', ');
+    tips.push(
+      `**Also changes ${risky.length} high-risk file${risky.length === 1 ? '' : 's'}** (${names}). Move migration/CI/infra changes into a separate PR so a logic bug can't block them — and vice versa.`,
+    );
+  }
+
+  if (blast.changedFiles.length >= 40) {
+    tips.push(
+      `**Large PR (${blast.changedFiles.length} files).** Smaller, focused PRs review faster and carry a narrower blast radius.`,
+    );
+  }
+
+  if (tips.length === 0) return '';
+  const rows: string[] = [];
+  rows.push('## How to reduce the blast radius');
+  rows.push('');
+  for (const tip of tips.slice(0, 4)) rows.push(`- ${tip}`);
+  return rows.join('\n');
+}
+
+/**
+ * @brief: The changed-symbol file with the most entries, for the hot-file
+ *         recommendation. Returns null when there are no changed symbols.
+ */
+function hottestFile(symbols: SymbolRef[]): { path: string; count: number } | null {
+  const counts = new Map<string, number>();
+  for (const s of symbols) counts.set(s.filePath, (counts.get(s.filePath) ?? 0) + 1);
+  let best: { path: string; count: number } | null = null;
+  for (const [path, count] of counts) {
+    if (best === null || count > best.count) best = { path, count };
+  }
+  return best;
 }
 
 /**
