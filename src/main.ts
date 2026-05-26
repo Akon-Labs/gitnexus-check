@@ -18,21 +18,26 @@ import {
 } from './hub-client';
 import { renderComment, COMMENT_MARKER } from './render-comment';
 import { asIssueCommentsClient, postOrUpdateComment } from './post-comment';
+import { parseThreshold, evaluateGate } from './gate';
 
 /**
  * @brief: Top-level orchestration. Sequence:
  *           1. Read inputs + validate event shape (non-PR → warn + exit 0).
- *           2. resolveRepoId  → Hub UUID for owner/repo.
- *           3. refreshBlast   → POST /refresh (synchronous on the live Hub).
- *           4. getBlast       → GET /prs/:n; validated by isBlastResult.
- *           5. renderComment  → markdown ≤ CHAR_BUDGET.
- *           6. postOrUpdate   → Octokit upsert by marker.
- *           7. setOutput      → comment-id, blast-level.
+ *           2. parseThreshold → validate fail-on-blast-level (bad → fail fast).
+ *           3. resolveRepoId  → Hub UUID for owner/repo.
+ *           4. refreshBlast   → POST /refresh (synchronous on the live Hub).
+ *           5. getBlast       → GET /prs/:n; validated by isBlastResult.
+ *           6. renderComment  → markdown ≤ CHAR_BUDGET.
+ *           7. postOrUpdate   → Octokit upsert by marker.
+ *           8. setOutput      → comment-id, blast-level, gate-decision.
+ *           9. evaluateGate   → setFailed iff blast level meets/exceeds threshold.
  *
  *         Every Hub call wraps in try/catch → classifyError('hub'); every
- *         GitHub call wraps similarly with 'github' context. On any thrown
- *         classified message we call core.error + core.setFailed and
- *         return — no further work after the first failure.
+ *         GitHub call wraps similarly with 'github' context. The gate is the
+ *         only setFailed driven by a successful run and fires AFTER the
+ *         comment is posted. On any thrown classified message we call
+ *         core.error + core.setFailed and return — no further work after the
+ *         first failure.
  *
  * @returns: void — exits via core.setFailed on error or returns cleanly.
  */
@@ -57,6 +62,15 @@ export async function main(): Promise<void> {
   const fullName = `${owner}/${repo}`;
 
   core.info(`GitNexus Review — PR #${prNumber} (${fullName})`);
+
+  // ── 2. Validate the gate threshold up-front so a typo fails fast,
+  //        before any Hub round-trip. Empty input → advisory (null).
+  let threshold;
+  try {
+    threshold = parseThreshold(core.getInput('fail-on-blast-level'));
+  } catch (err) {
+    return fail(err, 'config', 'parseThreshold');
+  }
 
   let repoId: string;
   try {
@@ -98,6 +112,17 @@ export async function main(): Promise<void> {
   core.setOutput('comment-id', String(posted.commentId));
   core.setOutput('blast-level', blast.blastLevel);
   core.info(`Comment ${posted.action} (id=${posted.commentId}); blast=${blast.blastLevel}.`);
+
+  // ── 9. Gate — the only success-path setFailed, evaluated after the
+  //        comment is posted so reviewers always have the report.
+  const decision = evaluateGate({ blastLevel: blast.blastLevel, threshold });
+  core.setOutput('gate-decision', decision);
+  if (decision === 'fail') {
+    core.setFailed(
+      `GitNexus gate: blast level ${blast.blastLevel} meets or exceeds threshold ${threshold}. See PR comment.`,
+    );
+    return;
+  }
 }
 
 /**
@@ -106,11 +131,11 @@ export async function main(): Promise<void> {
  *         body stays readable and so there's a single audit trail for
  *         token-safety: this function never receives the token value.
  *
- * @params: (err: unknown)                  -> Thrown value from a library call.
- * @params: (context: 'hub' | 'github')     -> Which side raised the error.
- * @params: (stage: string)                 -> Short stage label for the prefix.
+ * @params: (err: unknown)                        -> Thrown value from a library call.
+ * @params: (context: 'hub' | 'github' | 'config') -> Which side raised the error.
+ * @params: (stage: string)                        -> Short stage label for the prefix.
  */
-function fail(err: unknown, context: 'hub' | 'github', stage: string): void {
+function fail(err: unknown, context: 'hub' | 'github' | 'config', stage: string): void {
   const msg = classifyError(err, context);
   const line = `${stage}: ${msg}`;
   core.error(line);

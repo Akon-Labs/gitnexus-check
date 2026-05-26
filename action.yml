@@ -12,11 +12,17 @@ inputs:
     description: 'GitHub token used to post the PR comment. Defaults to the auto-issued workflow token.'
     required: false
     default: ${{ github.token }}
+  fail-on-blast-level:
+    description: 'Optional gate. Accepts LOW | MEDIUM | HIGH | CRITICAL. When set, the action fails the workflow if the PR blast level meets or exceeds this value (after posting the comment). Empty (default) is advisory and never fails.'
+    required: false
+    default: ''
 outputs:
   comment-id:
     description: 'GitHub comment id we created or updated.'
   blast-level:
     description: 'Overall blast level returned by the Hub: LOW | MEDIUM | HIGH | CRITICAL.'
+  gate-decision:
+    description: 'Gate outcome: pass | fail | neutral. neutral means the gate was advisory (no fail-on-blast-level set).'
 runs:
   using: 'node20'
   main: 'dist/index.js'

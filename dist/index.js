@@ -34303,6 +34303,15 @@ exports.classifyError = classifyError;
  * @returns: string — the user-visible failure reason.
  */
 function classifyError(err, context) {
+    // Config errors are local input-validation throws (e.g. a bad
+    // `fail-on-blast-level` value) carrying an intentional, stable message.
+    // Pass that message through unchanged — only token-scrubbed — rather than
+    // run it through HTTP-status classification that never applies here.
+    if (context === 'config') {
+        if (err instanceof Error)
+            return scrubMessage(err.message || 'invalid configuration');
+        return 'invalid configuration';
+    }
     const axiosLike = asAxiosLike(err);
     if (axiosLike) {
         const status = axiosLike.response?.status;
@@ -34464,6 +34473,74 @@ function isHtmlBody(data) {
  */
 function scrubMessage(msg) {
     return msg.replace(/gnx_[A-Za-z0-9_-]+/g, 'gnx_[redacted]');
+}
+
+
+/***/ }),
+
+/***/ 1956:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * @brief: Pure opt-in gate logic for the action. Translates the
+ *         `fail-on-blast-level` input into a typed threshold and decides
+ *         whether a given blast level should fail the workflow. Contains no
+ *         I/O and no `core.*` calls (§4.3/§5) — main.ts owns the side
+ *         effects; this module is fully unit-testable.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.parseThreshold = parseThreshold;
+exports.evaluateGate = evaluateGate;
+/**
+ * @brief: Total order over blast levels so a threshold comparison is a
+ *         simple numeric `>=`. LOW is least severe, CRITICAL most severe.
+ */
+const LEVEL_ORDER = {
+    LOW: 0,
+    MEDIUM: 1,
+    HIGH: 2,
+    CRITICAL: 3,
+};
+/**
+ * @brief: Parse the raw `fail-on-blast-level` input into a threshold. An
+ *         empty/whitespace value means the gate is advisory and is mapped
+ *         to `null`. A valid uppercase level maps to itself. Any other
+ *         value is rejected so a typo fails the run fast rather than
+ *         silently disabling the gate. Matching is strict-uppercase by
+ *         design: lowercase is treated as a typo, not a convenience.
+ *
+ * @params: (raw: string) -> The unvalidated action input value.
+ *
+ * @returns: BlastLevel | null — the threshold, or null when advisory.
+ * @throws: Error('fail-on-blast-level: invalid value "X" — expected LOW, MEDIUM, HIGH, or CRITICAL')
+ *          when raw is non-empty but not one of the four uppercase levels.
+ */
+function parseThreshold(raw) {
+    const trimmed = raw.trim();
+    if (trimmed === '')
+        return null;
+    if (trimmed === 'LOW' || trimmed === 'MEDIUM' || trimmed === 'HIGH' || trimmed === 'CRITICAL') {
+        return trimmed;
+    }
+    throw new Error(`fail-on-blast-level: invalid value "${trimmed}" — expected LOW, MEDIUM, HIGH, or CRITICAL`);
+}
+/**
+ * @brief: Decide the gate outcome for a blast level against a threshold.
+ *         A null threshold is advisory and always yields `neutral`. With a
+ *         threshold set, the gate fails when the blast level MEETS OR
+ *         EXCEEDS the threshold (`>=` in LEVEL_ORDER), otherwise passes.
+ *
+ * @params: (opts.blastLevel: BlastLevel)        -> Hub-reported overall blast level.
+ * @params: (opts.threshold: BlastLevel | null)  -> Parsed threshold; null = advisory.
+ *
+ * @returns: GateDecision — 'neutral' when advisory, else 'fail' on meet-or-exceed, else 'pass'.
+ */
+function evaluateGate(opts) {
+    if (opts.threshold === null)
+        return 'neutral';
+    return LEVEL_ORDER[opts.blastLevel] >= LEVEL_ORDER[opts.threshold] ? 'fail' : 'pass';
 }
 
 
@@ -34720,20 +34797,25 @@ const classify_error_1 = __nccwpck_require__(6042);
 const hub_client_1 = __nccwpck_require__(4162);
 const render_comment_1 = __nccwpck_require__(7323);
 const post_comment_1 = __nccwpck_require__(1229);
+const gate_1 = __nccwpck_require__(1956);
 /**
  * @brief: Top-level orchestration. Sequence:
  *           1. Read inputs + validate event shape (non-PR → warn + exit 0).
- *           2. resolveRepoId  → Hub UUID for owner/repo.
- *           3. refreshBlast   → POST /refresh (synchronous on the live Hub).
- *           4. getBlast       → GET /prs/:n; validated by isBlastResult.
- *           5. renderComment  → markdown ≤ CHAR_BUDGET.
- *           6. postOrUpdate   → Octokit upsert by marker.
- *           7. setOutput      → comment-id, blast-level.
+ *           2. parseThreshold → validate fail-on-blast-level (bad → fail fast).
+ *           3. resolveRepoId  → Hub UUID for owner/repo.
+ *           4. refreshBlast   → POST /refresh (synchronous on the live Hub).
+ *           5. getBlast       → GET /prs/:n; validated by isBlastResult.
+ *           6. renderComment  → markdown ≤ CHAR_BUDGET.
+ *           7. postOrUpdate   → Octokit upsert by marker.
+ *           8. setOutput      → comment-id, blast-level, gate-decision.
+ *           9. evaluateGate   → setFailed iff blast level meets/exceeds threshold.
  *
  *         Every Hub call wraps in try/catch → classifyError('hub'); every
- *         GitHub call wraps similarly with 'github' context. On any thrown
- *         classified message we call core.error + core.setFailed and
- *         return — no further work after the first failure.
+ *         GitHub call wraps similarly with 'github' context. The gate is the
+ *         only setFailed driven by a successful run and fires AFTER the
+ *         comment is posted. On any thrown classified message we call
+ *         core.error + core.setFailed and return — no further work after the
+ *         first failure.
  *
  * @returns: void — exits via core.setFailed on error or returns cleanly.
  */
@@ -34756,6 +34838,15 @@ async function main() {
     const repo = ctx.repo.repo;
     const fullName = `${owner}/${repo}`;
     core.info(`GitNexus Review — PR #${prNumber} (${fullName})`);
+    // ── 2. Validate the gate threshold up-front so a typo fails fast,
+    //        before any Hub round-trip. Empty input → advisory (null).
+    let threshold;
+    try {
+        threshold = (0, gate_1.parseThreshold)(core.getInput('fail-on-blast-level'));
+    }
+    catch (err) {
+        return fail(err, 'config', 'parseThreshold');
+    }
     let repoId;
     try {
         repoId = await (0, hub_client_1.resolveRepoId)({ hubUrl, token, fullName });
@@ -34795,6 +34886,14 @@ async function main() {
     core.setOutput('comment-id', String(posted.commentId));
     core.setOutput('blast-level', blast.blastLevel);
     core.info(`Comment ${posted.action} (id=${posted.commentId}); blast=${blast.blastLevel}.`);
+    // ── 9. Gate — the only success-path setFailed, evaluated after the
+    //        comment is posted so reviewers always have the report.
+    const decision = (0, gate_1.evaluateGate)({ blastLevel: blast.blastLevel, threshold });
+    core.setOutput('gate-decision', decision);
+    if (decision === 'fail') {
+        core.setFailed(`GitNexus gate: blast level ${blast.blastLevel} meets or exceeds threshold ${threshold}. See PR comment.`);
+        return;
+    }
 }
 /**
  * @brief: Translate any thrown value into a user-visible failure via
@@ -34802,9 +34901,9 @@ async function main() {
  *         body stays readable and so there's a single audit trail for
  *         token-safety: this function never receives the token value.
  *
- * @params: (err: unknown)                  -> Thrown value from a library call.
- * @params: (context: 'hub' | 'github')     -> Which side raised the error.
- * @params: (stage: string)                 -> Short stage label for the prefix.
+ * @params: (err: unknown)                        -> Thrown value from a library call.
+ * @params: (context: 'hub' | 'github' | 'config') -> Which side raised the error.
+ * @params: (stage: string)                        -> Short stage label for the prefix.
  */
 function fail(err, context, stage) {
     const msg = (0, classify_error_1.classifyError)(err, context);
@@ -34993,6 +35092,8 @@ const TOP_N_BLAST_LIST = 20;
 const TOP_N_MODULE_ROWS = 20;
 const TOP_N_SYMBOL_ROWS = 50;
 const TOP_N_RISK_FILES = 20;
+const TOP_N_FLOW_ROWS = 20;
+const TOP_N_FILE_ROWS = 20;
 /**
  * @brief: Render a BlastResult into the v1 comment markdown. Always starts
  *         with COMMENT_MARKER. Sections are emitted only when their
@@ -35049,6 +35150,12 @@ function buildBody(blast, opts, cfg) {
     if (isEmptyBlast(blast)) {
         parts.push('No symbol changes, blast radius, architecture impact, or API surface changes detected.');
         parts.push('');
+        // Docs-only / config-only PRs carry changedFiles but no blast signal.
+        // Still surface the file list so the comment isn't content-free.
+        if (blast.changedFiles.length > 0) {
+            parts.push(renderChangedFiles(blast.changedFiles, cfg.detailLevel));
+            parts.push('');
+        }
         appendFooter(parts, blast, opts.hubUrl, false);
         return parts.join('\n');
     }
@@ -35072,6 +35179,11 @@ function appendSections(parts, blast, detail) {
         parts.push('');
         rendered = true;
     }
+    if (detail !== 'minimal' && blast.affectedFlows.length > 0) {
+        parts.push(renderAffectedFlows(blast.affectedFlows, detail));
+        parts.push('');
+        rendered = true;
+    }
     if (detail !== 'minimal' && hasBlastRadius(blast)) {
         parts.push(renderBlastRadius(blast, detail));
         parts.push('');
@@ -35090,6 +35202,11 @@ function appendSections(parts, blast, detail) {
             rendered = true;
         }
     }
+    if (detail !== 'minimal' && blast.changedFiles.length > 0) {
+        parts.push(renderChangedFiles(blast.changedFiles, detail));
+        parts.push('');
+        rendered = true;
+    }
     if (detail === 'full' && blast.riskFiles.length > 0) {
         parts.push(renderRiskFiles(blast.riskFiles));
         parts.push('');
@@ -35098,9 +35215,18 @@ function appendSections(parts, blast, detail) {
     return rendered;
 }
 /**
- * @brief: Single-line summary for the blockquote at the top. Empty string
- *         when there's nothing to summarise (the renderer suppresses the
- *         blockquote entirely in that case).
+ * @brief: The Verdict — a deterministic single-line ruling for the
+ *         blockquote at the top, derived solely from already-validated
+ *         numeric/enum fields (never untrusted PR title/branch strings).
+ *         Combines the blast-level ruling, total dependent count, module
+ *         count, a flow addendum when flows are present, a level-based
+ *         rationale clause for MEDIUM/HIGH/CRITICAL (LOW emits none), and
+ *         the stale marker. Returns '' when there is nothing to summarise
+ *         so the renderer can suppress the blockquote.
+ *
+ * @params: (blast: BlastResult) -> Normalised Hub result.
+ *
+ * @returns: string — the one-line verdict, or '' when empty.
  */
 function buildHeadline(blast) {
     const bits = [];
@@ -35112,9 +35238,32 @@ function buildHeadline(blast) {
         const m = blast.affectedModules.length;
         bits.push(`${m} module${m === 1 ? '' : 's'} touched`);
     }
+    const flows = blast.affectedFlows.length;
+    if (flows > 0)
+        bits.push(`${flows} flow${flows === 1 ? '' : 's'} affected`);
+    const rationale = levelRationale(blast.blastLevel);
+    if (rationale)
+        bits.push(rationale);
     if (blast.stale)
         bits.push('_(stale — re-run for fresh analysis)_');
     return bits.join(' · ');
+}
+/**
+ * @brief: Short parenthetical rationale for the verdict, keyed off the
+ *         blast level. LOW returns '' (no clause); MEDIUM/HIGH/CRITICAL
+ *         return a fixed `_(...)_` reason.
+ */
+function levelRationale(level) {
+    switch (level) {
+        case 'CRITICAL':
+            return '_(critical surface — review carefully before merge)_';
+        case 'HIGH':
+            return '_(high reach — verify dependents)_';
+        case 'MEDIUM':
+            return '_(moderate reach — spot-check dependents)_';
+        default:
+            return '';
+    }
 }
 function isEmptyBlast(blast) {
     return (blast.changedSymbols.length === 0 &&
@@ -35122,6 +35271,7 @@ function isEmptyBlast(blast) {
         blast.d2Symbols.length === 0 &&
         blast.d3Symbols.length === 0 &&
         blast.affectedModules.length === 0 &&
+        blast.affectedFlows.length === 0 &&
         blast.riskFiles.length === 0);
 }
 function hasBlastRadius(blast) {
@@ -35142,6 +35292,70 @@ function renderArchitectureImpact(modules, detail) {
     if (sorted.length > shown.length) {
         rows.push('');
         rows.push(`_(${sorted.length - shown.length} more module${sorted.length - shown.length === 1 ? '' : 's'})_`);
+    }
+    return rows.join('\n');
+}
+/**
+ * @brief: Render the Affected Flows table (`| Process | Hits |`), sorted by
+ *         hitCount descending when present. Each flow's display name is the
+ *         first defined string of processName, name, or processId, falling
+ *         back to '(unnamed flow)'; every Hub string is run through
+ *         escapeCell (§6.1). Rows are capped at TOP_N_FLOW_ROWS at the
+ *         capped detail level with a `_(N more)_` trailer.
+ */
+function renderAffectedFlows(flows, detail) {
+    const cap = detail === 'capped' ? TOP_N_FLOW_ROWS : flows.length;
+    const sorted = [...flows].sort((a, b) => flowHits(b) - flowHits(a));
+    const shown = sorted.slice(0, cap);
+    const rows = [];
+    rows.push('### Affected Flows');
+    rows.push('');
+    rows.push('| Process | Hits |');
+    rows.push('|---|---|');
+    for (const f of shown) {
+        const hits = typeof f.hitCount === 'number' ? String(f.hitCount) : '—';
+        rows.push(`| ${escapeCell(flowName(f))} | ${hits} |`);
+    }
+    if (sorted.length > shown.length) {
+        rows.push('');
+        rows.push(`_(${sorted.length - shown.length} more flow${sorted.length - shown.length === 1 ? '' : 's'})_`);
+    }
+    return rows.join('\n');
+}
+/** Narrow the flow's display name without `as`; fall back to a placeholder. */
+function flowName(flow) {
+    if (typeof flow.processName === 'string' && flow.processName)
+        return flow.processName;
+    if (typeof flow.name === 'string' && flow.name)
+        return flow.name;
+    if (typeof flow.processId === 'string' && flow.processId)
+        return flow.processId;
+    return '(unnamed flow)';
+}
+/** Numeric hit count for sorting; absent/non-numeric sorts last as 0. */
+function flowHits(flow) {
+    return typeof flow.hitCount === 'number' ? flow.hitCount : 0;
+}
+/**
+ * @brief: Render the Changed Files table (`| File | Status |`). Both fields
+ *         are emitted through escapeCell (§6.1) as untrusted repo strings.
+ *         Rows are capped at TOP_N_FILE_ROWS at the capped detail level with
+ *         a `_(N more)_` trailer mirroring the other renderers.
+ */
+function renderChangedFiles(files, detail) {
+    const cap = detail === 'capped' ? TOP_N_FILE_ROWS : files.length;
+    const shown = files.slice(0, cap);
+    const rows = [];
+    rows.push('### Changed Files');
+    rows.push('');
+    rows.push('| File | Status |');
+    rows.push('|---|---|');
+    for (const f of shown) {
+        rows.push(`| \`${escapeCell(f.path)}\` | ${escapeCell(f.status)} |`);
+    }
+    if (files.length > shown.length) {
+        rows.push('');
+        rows.push(`_(${files.length - shown.length} more file${files.length - shown.length === 1 ? '' : 's'})_`);
     }
     return rows.join('\n');
 }

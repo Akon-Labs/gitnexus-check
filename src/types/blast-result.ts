@@ -70,14 +70,24 @@ export interface RiskFile {
 }
 
 /**
- * @brief: Flow record — Hub-side processName + symbols. The Hub may emit
- *         richer fields in the future; render-comment treats this as opaque
- *         for v1 (no section yet) but the type accepts arbitrary keys.
+ * @brief: Execution flow touched by the PR, as reported by the Hub. All
+ *         fields are optional because the Hub populates them opportunistically
+ *         depending on what the flow analyser resolved; the renderer narrows
+ *         each field with a `typeof` guard before use rather than trusting
+ *         presence.
+ *
+ * @params: (name)        -> Legacy display name (older Hub builds).
+ * @params: (processId)   -> Stable id of the execution flow / process.
+ * @params: (processName) -> Human-readable flow name; preferred for display.
+ * @params: (hitSymbols)  -> Symbol names within the flow that the change touched.
+ * @params: (hitCount)    -> Number of touched symbols; drives row ordering.
  */
 export interface AffectedFlow {
   name?: string;
+  processId?: string;
   processName?: string;
-  [extra: string]: unknown;
+  hitSymbols?: string[];
+  hitCount?: number;
 }
 
 /**

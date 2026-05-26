@@ -143,3 +143,31 @@ describe('normalizeBlastResult', () => {
     expect(normalizeBlastResult(v).fileRiskLevel).toBeNull();
   });
 });
+
+describe('AffectedFlow shape through normalize', () => {
+  it('preserves the tightened optional flow fields verbatim', () => {
+    const v = {
+      blastLevel: 'CRITICAL',
+      truncated: false,
+      computedAt: 'x',
+      affectedFlows: [
+        {
+          processId: 'proc-1',
+          processName: 'Indexing Queue Lifecycle',
+          hitSymbols: ['enqueueJob', 'drainQueue'],
+          hitCount: 7,
+        },
+        { name: 'legacy-flow' },
+      ],
+    } as unknown as BlastResult;
+    const out = normalizeBlastResult(v);
+    expect(out.affectedFlows).toHaveLength(2);
+    const [first, second] = out.affectedFlows;
+    expect(first.processId).toBe('proc-1');
+    expect(first.processName).toBe('Indexing Queue Lifecycle');
+    expect(first.hitSymbols).toEqual(['enqueueJob', 'drainQueue']);
+    expect(first.hitCount).toBe(7);
+    expect(second.name).toBe('legacy-flow');
+    expect(second.processName).toBeUndefined();
+  });
+});

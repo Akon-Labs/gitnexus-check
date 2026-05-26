@@ -1,0 +1,100 @@
+{
+  "prNumber": 152,
+  "prTitle": "feat(hub): indexing-queue observability + soak + runbook (#143 PR-5)",
+  "prAuthor": "abhigyanpatwari",
+  "prBranch": "claude/pgboss-pr5-load-obs",
+  "prStatus": "open",
+  "blastLevel": "CRITICAL",
+  "changedSymbols": [
+    {
+      "id": "Function:gitnexus-hub/scripts/create-invite.ts:generateCode",
+      "name": "generateCode",
+      "type": "Function",
+      "endLine": 20,
+      "filePath": "gitnexus-hub/scripts/create-invite.ts",
+      "startLine": 14
+    },
+    {
+      "id": "Function:gitnexus-hub/scripts/create-invite.ts:main",
+      "name": "main",
+      "type": "Function",
+      "endLine": 64,
+      "filePath": "gitnexus-hub/scripts/create-invite.ts",
+      "startLine": 22
+    }
+  ],
+  "d1Symbols": [
+    {
+      "id": "File:gitnexus-hub/scripts/create-invite.ts",
+      "name": "create-invite.ts",
+      "type": "File",
+      "endLine": null,
+      "filePath": "gitnexus-hub/scripts/create-invite.ts",
+      "startLine": null
+    }
+  ],
+  "d2Symbols": [],
+  "d3Symbols": [],
+  "affectedFlows": [
+    {
+      "processId": "proc-indexing-queue",
+      "processName": "Indexing Queue Lifecycle",
+      "hitSymbols": ["enqueueJob", "drainQueue"],
+      "hitCount": 7
+    },
+    {
+      "processId": "proc-invite-issue",
+      "processName": "Invite Issuance",
+      "hitSymbols": ["generateCode"],
+      "hitCount": 3
+    },
+    {
+      "processId": "proc-orphan"
+    }
+  ],
+  "affectedModules": [
+    {
+      "hits": 2,
+      "name": "Scripts",
+      "direct": false
+    }
+  ],
+  "changedFiles": [
+    {
+      "path": "docs/superpowers/specs/2026-05-12-pgboss-indexing-queue-runbook.md",
+      "status": "added"
+    },
+    {
+      "path": "gitnexus-hub/scripts/indexing-queue-soak.mjs",
+      "status": "added"
+    },
+    {
+      "path": "gitnexus-hub/src/routes/admin.ts",
+      "status": "modified"
+    },
+    {
+      "path": "gitnexus-hub/src/services/indexing-queue.ts",
+      "status": "modified"
+    },
+    {
+      "path": "gitnexus-hub/test/unit/indexing-queue.test.ts",
+      "status": "modified"
+    }
+  ],
+  "fileRiskLevel": "LOW",
+  "riskFiles": [
+    {
+      "path": "docs/superpowers/specs/2026-05-12-pgboss-indexing-queue-runbook.md",
+      "risk": "LOW",
+      "status": "added",
+      "category": "Documentation"
+    }
+  ],
+  "graphData": {
+    "links": [],
+    "nodes": []
+  },
+  "truncated": false,
+  "stale": false,
+  "computedAt": "2026-05-17T18:27:42.511Z"
+}

@@ -8,8 +8,10 @@
  */
 
 import type {
+  AffectedFlow,
   AffectedModule,
   BlastResult,
+  ChangedFile,
   RiskFile,
   SymbolRef,
 } from './types/blast-result';
@@ -35,6 +37,8 @@ const TOP_N_BLAST_LIST = 20;
 const TOP_N_MODULE_ROWS = 20;
 const TOP_N_SYMBOL_ROWS = 50;
 const TOP_N_RISK_FILES = 20;
+const TOP_N_FLOW_ROWS = 20;
+const TOP_N_FILE_ROWS = 20;
 
 /**
  * @brief: Render a BlastResult into the v1 comment markdown. Always starts
@@ -107,6 +111,12 @@ function buildBody(
       'No symbol changes, blast radius, architecture impact, or API surface changes detected.',
     );
     parts.push('');
+    // Docs-only / config-only PRs carry changedFiles but no blast signal.
+    // Still surface the file list so the comment isn't content-free.
+    if (blast.changedFiles.length > 0) {
+      parts.push(renderChangedFiles(blast.changedFiles, cfg.detailLevel));
+      parts.push('');
+    }
     appendFooter(parts, blast, opts.hubUrl, false);
     return parts.join('\n');
   }
@@ -143,6 +153,11 @@ function appendSections(
     parts.push('');
     rendered = true;
   }
+  if (detail !== 'minimal' && blast.affectedFlows.length > 0) {
+    parts.push(renderAffectedFlows(blast.affectedFlows, detail));
+    parts.push('');
+    rendered = true;
+  }
   if (detail !== 'minimal' && hasBlastRadius(blast)) {
     parts.push(renderBlastRadius(blast, detail));
     parts.push('');
@@ -161,6 +176,11 @@ function appendSections(
       rendered = true;
     }
   }
+  if (detail !== 'minimal' && blast.changedFiles.length > 0) {
+    parts.push(renderChangedFiles(blast.changedFiles, detail));
+    parts.push('');
+    rendered = true;
+  }
   if (detail === 'full' && blast.riskFiles.length > 0) {
     parts.push(renderRiskFiles(blast.riskFiles));
     parts.push('');
@@ -170,9 +190,18 @@ function appendSections(
 }
 
 /**
- * @brief: Single-line summary for the blockquote at the top. Empty string
- *         when there's nothing to summarise (the renderer suppresses the
- *         blockquote entirely in that case).
+ * @brief: The Verdict — a deterministic single-line ruling for the
+ *         blockquote at the top, derived solely from already-validated
+ *         numeric/enum fields (never untrusted PR title/branch strings).
+ *         Combines the blast-level ruling, total dependent count, module
+ *         count, a flow addendum when flows are present, a level-based
+ *         rationale clause for MEDIUM/HIGH/CRITICAL (LOW emits none), and
+ *         the stale marker. Returns '' when there is nothing to summarise
+ *         so the renderer can suppress the blockquote.
+ *
+ * @params: (blast: BlastResult) -> Normalised Hub result.
+ *
+ * @returns: string — the one-line verdict, or '' when empty.
  */
 function buildHeadline(blast: BlastResult): string {
   const bits: string[] = [];
@@ -183,8 +212,30 @@ function buildHeadline(blast: BlastResult): string {
     const m = blast.affectedModules.length;
     bits.push(`${m} module${m === 1 ? '' : 's'} touched`);
   }
+  const flows = blast.affectedFlows.length;
+  if (flows > 0) bits.push(`${flows} flow${flows === 1 ? '' : 's'} affected`);
+  const rationale = levelRationale(blast.blastLevel);
+  if (rationale) bits.push(rationale);
   if (blast.stale) bits.push('_(stale — re-run for fresh analysis)_');
   return bits.join(' · ');
+}
+
+/**
+ * @brief: Short parenthetical rationale for the verdict, keyed off the
+ *         blast level. LOW returns '' (no clause); MEDIUM/HIGH/CRITICAL
+ *         return a fixed `_(...)_` reason.
+ */
+function levelRationale(level: BlastResult['blastLevel']): string {
+  switch (level) {
+    case 'CRITICAL':
+      return '_(critical surface — review carefully before merge)_';
+    case 'HIGH':
+      return '_(high reach — verify dependents)_';
+    case 'MEDIUM':
+      return '_(moderate reach — spot-check dependents)_';
+    default:
+      return '';
+  }
 }
 
 function isEmptyBlast(blast: BlastResult): boolean {
@@ -194,6 +245,7 @@ function isEmptyBlast(blast: BlastResult): boolean {
     blast.d2Symbols.length === 0 &&
     blast.d3Symbols.length === 0 &&
     blast.affectedModules.length === 0 &&
+    blast.affectedFlows.length === 0 &&
     blast.riskFiles.length === 0
   );
 }
@@ -219,6 +271,71 @@ function renderArchitectureImpact(modules: AffectedModule[], detail: DetailLevel
   if (sorted.length > shown.length) {
     rows.push('');
     rows.push(`_(${sorted.length - shown.length} more module${sorted.length - shown.length === 1 ? '' : 's'})_`);
+  }
+  return rows.join('\n');
+}
+
+/**
+ * @brief: Render the Affected Flows table (`| Process | Hits |`), sorted by
+ *         hitCount descending when present. Each flow's display name is the
+ *         first defined string of processName, name, or processId, falling
+ *         back to '(unnamed flow)'; every Hub string is run through
+ *         escapeCell (§6.1). Rows are capped at TOP_N_FLOW_ROWS at the
+ *         capped detail level with a `_(N more)_` trailer.
+ */
+function renderAffectedFlows(flows: AffectedFlow[], detail: DetailLevel): string {
+  const cap = detail === 'capped' ? TOP_N_FLOW_ROWS : flows.length;
+  const sorted = [...flows].sort((a, b) => flowHits(b) - flowHits(a));
+  const shown = sorted.slice(0, cap);
+  const rows: string[] = [];
+  rows.push('### Affected Flows');
+  rows.push('');
+  rows.push('| Process | Hits |');
+  rows.push('|---|---|');
+  for (const f of shown) {
+    const hits = typeof f.hitCount === 'number' ? String(f.hitCount) : '—';
+    rows.push(`| ${escapeCell(flowName(f))} | ${hits} |`);
+  }
+  if (sorted.length > shown.length) {
+    rows.push('');
+    rows.push(`_(${sorted.length - shown.length} more flow${sorted.length - shown.length === 1 ? '' : 's'})_`);
+  }
+  return rows.join('\n');
+}
+
+/** Narrow the flow's display name without `as`; fall back to a placeholder. */
+function flowName(flow: AffectedFlow): string {
+  if (typeof flow.processName === 'string' && flow.processName) return flow.processName;
+  if (typeof flow.name === 'string' && flow.name) return flow.name;
+  if (typeof flow.processId === 'string' && flow.processId) return flow.processId;
+  return '(unnamed flow)';
+}
+
+/** Numeric hit count for sorting; absent/non-numeric sorts last as 0. */
+function flowHits(flow: AffectedFlow): number {
+  return typeof flow.hitCount === 'number' ? flow.hitCount : 0;
+}
+
+/**
+ * @brief: Render the Changed Files table (`| File | Status |`). Both fields
+ *         are emitted through escapeCell (§6.1) as untrusted repo strings.
+ *         Rows are capped at TOP_N_FILE_ROWS at the capped detail level with
+ *         a `_(N more)_` trailer mirroring the other renderers.
+ */
+function renderChangedFiles(files: ChangedFile[], detail: DetailLevel): string {
+  const cap = detail === 'capped' ? TOP_N_FILE_ROWS : files.length;
+  const shown = files.slice(0, cap);
+  const rows: string[] = [];
+  rows.push('### Changed Files');
+  rows.push('');
+  rows.push('| File | Status |');
+  rows.push('|---|---|');
+  for (const f of shown) {
+    rows.push(`| \`${escapeCell(f.path)}\` | ${escapeCell(f.status)} |`);
+  }
+  if (files.length > shown.length) {
+    rows.push('');
+    rows.push(`_(${files.length - shown.length} more file${files.length - shown.length === 1 ? '' : 's'})_`);
   }
   return rows.join('\n');
 }

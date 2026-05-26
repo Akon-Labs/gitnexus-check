@@ -152,6 +152,28 @@ describe('classifyError — GitHub context', () => {
   });
 });
 
+describe('classifyError — config context', () => {
+  it('passes a plain Error message through unchanged', () => {
+    const err = new Error(
+      'fail-on-blast-level: invalid value "bogus" — expected LOW, MEDIUM, HIGH, or CRITICAL',
+    );
+    expect(classifyError(err, 'config')).toBe(
+      'fail-on-blast-level: invalid value "bogus" — expected LOW, MEDIUM, HIGH, or CRITICAL',
+    );
+  });
+
+  it('still scrubs gnx_ tokens from config messages', () => {
+    const err = new Error('bad config near gnx_AAA111bbb222 token');
+    const out = classifyError(err, 'config');
+    expect(out).not.toContain('gnx_AAA111bbb222');
+    expect(out).toContain('gnx_[redacted]');
+  });
+
+  it('falls back for a non-Error config throw', () => {
+    expect(classifyError(42, 'config')).toBe('invalid configuration');
+  });
+});
+
 describe('classifyError — non-axios errors', () => {
   it('plain Error → message returned', () => {
     expect(classifyError(new Error('boom'), 'hub')).toBe('boom');

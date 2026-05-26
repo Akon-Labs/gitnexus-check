@@ -9,7 +9,7 @@
  */
 
 /** Context of the call that failed. Controls the wording on certain codes. */
-export type ErrorContext = 'hub' | 'github';
+export type ErrorContext = 'hub' | 'github' | 'config';
 
 /**
  * @brief: Minimal axios-error shape we recognise without importing axios.
@@ -41,6 +41,15 @@ interface AxiosLikeError {
  * @returns: string — the user-visible failure reason.
  */
 export function classifyError(err: unknown, context: ErrorContext): string {
+  // Config errors are local input-validation throws (e.g. a bad
+  // `fail-on-blast-level` value) carrying an intentional, stable message.
+  // Pass that message through unchanged — only token-scrubbed — rather than
+  // run it through HTTP-status classification that never applies here.
+  if (context === 'config') {
+    if (err instanceof Error) return scrubMessage(err.message || 'invalid configuration');
+    return 'invalid configuration';
+  }
+
   const axiosLike = asAxiosLike(err);
   if (axiosLike) {
     const status = axiosLike.response?.status;
