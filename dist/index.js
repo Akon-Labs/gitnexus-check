@@ -35088,6 +35088,13 @@ exports.COMMENT_MARKER = '<!-- gitnexus-review-v1 -->';
  *         drift introduced by `Buffer.byteLength` vs `.length`.
  */
 exports.CHAR_BUDGET = 60_000;
+/**
+ * @brief: Absolute URL for the Akon Labs logo shown in the comment header.
+ *         The comment lands in the *consumer's* repo, so a relative path
+ *         would not resolve — we pin a raw URL at `HEAD` (the default
+ *         branch of this Action's repo, where the asset is committed).
+ */
+const LOGO_URL = 'https://raw.githubusercontent.com/Akon-Labs/gitnexus-check/HEAD/.github/assets/akonlabs-logo.png';
 const TOP_N_BLAST_LIST = 20;
 const TOP_N_MODULE_ROWS = 20;
 const TOP_N_SYMBOL_ROWS = 50;
@@ -35136,11 +35143,11 @@ function buildBody(blast, opts, cfg) {
     const parts = [];
     parts.push(exports.COMMENT_MARKER);
     parts.push('');
-    parts.push(`## GitNexus Review: PR #${opts.prNumber}`);
+    parts.push(renderHeader(opts.prNumber));
     parts.push('');
     const headline = buildHeadline(blast);
     if (headline) {
-        parts.push(`> ${headline}`);
+        parts.push(`> ${levelEmoji(blast.blastLevel)} ${headline}`);
         parts.push('');
     }
     if (cfg.detailLevel === 'headline-only') {
@@ -35153,12 +35160,16 @@ function buildBody(blast, opts, cfg) {
         // Docs-only / config-only PRs carry changedFiles but no blast signal.
         // Still surface the file list so the comment isn't content-free.
         if (blast.changedFiles.length > 0) {
-            parts.push(renderChangedFiles(blast.changedFiles, cfg.detailLevel));
+            parts.push(detailsBlock(`Changed Files (${blast.changedFiles.length})`, renderChangedFiles(blast.changedFiles, cfg.detailLevel)));
             parts.push('');
         }
         appendFooter(parts, blast, opts.hubUrl, false);
         return parts.join('\n');
     }
+    parts.push(renderSummaryStrip(blast));
+    parts.push('');
+    parts.push('---');
+    parts.push('');
     const renderedAny = appendSections(parts, blast, cfg.detailLevel);
     if (!renderedAny) {
         parts.push('No symbol changes, blast radius, architecture impact, or API surface changes detected.');
@@ -35168,7 +35179,42 @@ function buildBody(blast, opts, cfg) {
     return parts.join('\n');
 }
 /**
- * @brief: Render the four signal sections in canonical order. Returns
+ * @brief: Centered header block: the Akon Labs logo above the review title.
+ *
+ * @params: (prNumber: number) -> GitHub PR number for the title.
+ * @returns: string — an HTML-centered markdown block.
+ */
+function renderHeader(prNumber) {
+    return [
+        '<div align="center">',
+        '',
+        `<img src="${LOGO_URL}" alt="Akon Labs" width="88" />`,
+        '',
+        `### GitNexus Review · PR #${prNumber}`,
+        '',
+        '</div>',
+    ].join('\n');
+}
+/**
+ * @brief: At-a-glance metrics strip rendered just under the verdict — a
+ *         one-row table of the headline numbers (level, dependents,
+ *         modules, flows, files) so a reviewer can scan impact instantly.
+ *
+ * @params: (blast: BlastResult) -> Normalised Hub result.
+ * @returns: string — a single-row markdown table.
+ */
+function renderSummaryStrip(blast) {
+    const deps = blast.d1Symbols.length + blast.d2Symbols.length + blast.d3Symbols.length;
+    return [
+        '| Blast Level | Dependents | Modules | Flows | Files |',
+        '|:--:|:--:|:--:|:--:|:--:|',
+        `| ${levelEmoji(blast.blastLevel)} \`${blast.blastLevel}\` | ${deps} | ${blast.affectedModules.length} | ${blast.affectedFlows.length} | ${blast.changedFiles.length} |`,
+    ].join('\n');
+}
+/**
+ * @brief: Render the signal sections in canonical order. Long, skimmable
+ *         lists (Symbol Changes, Changed Files, File Risk) are wrapped in
+ *         collapsible <details> so the comment stays scannable. Returns
  *         true if at least one section was emitted, so the caller can
  *         decide whether to fall back to the "no impact" sentence.
  */
@@ -35190,7 +35236,7 @@ function appendSections(parts, blast, detail) {
         rendered = true;
     }
     if (detail !== 'minimal' && blast.changedSymbols.length > 0) {
-        parts.push(renderSymbolChanges(blast.changedSymbols, detail));
+        parts.push(detailsBlock(`Symbol Changes (${blast.changedSymbols.length})`, renderSymbolChanges(blast.changedSymbols, detail)));
         parts.push('');
         rendered = true;
     }
@@ -35203,12 +35249,12 @@ function appendSections(parts, blast, detail) {
         }
     }
     if (detail !== 'minimal' && blast.changedFiles.length > 0) {
-        parts.push(renderChangedFiles(blast.changedFiles, detail));
+        parts.push(detailsBlock(`Changed Files (${blast.changedFiles.length})`, renderChangedFiles(blast.changedFiles, detail)));
         parts.push('');
         rendered = true;
     }
     if (detail === 'full' && blast.riskFiles.length > 0) {
-        parts.push(renderRiskFiles(blast.riskFiles));
+        parts.push(detailsBlock(`File Risk (${blast.riskFiles.length})`, renderRiskFiles(blast.riskFiles)));
         parts.push('');
         rendered = true;
     }
@@ -35265,6 +35311,40 @@ function levelRationale(level) {
             return '';
     }
 }
+/** Traffic-light emoji for a blast/risk level. */
+function levelEmoji(level) {
+    switch (level) {
+        case 'CRITICAL':
+            return '🔴';
+        case 'HIGH':
+            return '🟠';
+        case 'MEDIUM':
+            return '🟡';
+        default:
+            return '🟢';
+    }
+}
+/** Emoji-prefixed, escaped change-status cell (added/modified/removed/renamed). */
+function statusBadge(status) {
+    const e = status === 'added'
+        ? '🟢'
+        : status === 'modified'
+            ? '🟡'
+            : status === 'removed'
+                ? '🔴'
+                : status === 'renamed'
+                    ? '🔵'
+                    : '⚪';
+    return `${e} ${escapeCell(status)}`;
+}
+/** Emoji-prefixed, escaped file-risk cell. */
+function riskBadge(risk) {
+    return `${levelEmoji(risk)} ${escapeCell(risk)}`;
+}
+/** Wrap inner markdown in a collapsible <details> with a bold summary. */
+function detailsBlock(summary, inner) {
+    return ['<details>', `<summary><b>${summary}</b></summary>`, '', inner, '', '</details>'].join('\n');
+}
 function isEmptyBlast(blast) {
     return (blast.changedSymbols.length === 0 &&
         blast.d1Symbols.length === 0 &&
@@ -35285,9 +35365,9 @@ function renderArchitectureImpact(modules, detail) {
     rows.push('### Architecture Impact');
     rows.push('');
     rows.push('| Module | Hits | Direct |');
-    rows.push('|---|---|---|');
+    rows.push('|---|--:|:--:|');
     for (const m of shown) {
-        rows.push(`| \`${escapeCell(m.name)}\` | ${m.hits} | ${m.direct ? 'yes' : 'no'} |`);
+        rows.push(`| \`${escapeCell(m.name)}\` | ${m.hits} | ${m.direct ? '🟢' : '⚪'} |`);
     }
     if (sorted.length > shown.length) {
         rows.push('');
@@ -35311,7 +35391,7 @@ function renderAffectedFlows(flows, detail) {
     rows.push('### Affected Flows');
     rows.push('');
     rows.push('| Process | Hits |');
-    rows.push('|---|---|');
+    rows.push('|---|--:|');
     for (const f of shown) {
         const hits = typeof f.hitCount === 'number' ? String(f.hitCount) : '—';
         rows.push(`| ${escapeCell(flowName(f))} | ${hits} |`);
@@ -35337,21 +35417,20 @@ function flowHits(flow) {
     return typeof flow.hitCount === 'number' ? flow.hitCount : 0;
 }
 /**
- * @brief: Render the Changed Files table (`| File | Status |`). Both fields
- *         are emitted through escapeCell (§6.1) as untrusted repo strings.
- *         Rows are capped at TOP_N_FILE_ROWS at the capped detail level with
- *         a `_(N more)_` trailer mirroring the other renderers.
+ * @brief: Render the Changed Files table (`| File | Status |`). The path is
+ *         emitted through escapeCell (§6.1) as an untrusted repo string and
+ *         the status as an emoji-prefixed badge. Rows are capped at
+ *         TOP_N_FILE_ROWS at the capped detail level with a `_(N more)_`
+ *         trailer. The caller wraps the result in a collapsible block.
  */
 function renderChangedFiles(files, detail) {
     const cap = detail === 'capped' ? TOP_N_FILE_ROWS : files.length;
     const shown = files.slice(0, cap);
     const rows = [];
-    rows.push('### Changed Files');
-    rows.push('');
     rows.push('| File | Status |');
-    rows.push('|---|---|');
+    rows.push('|---|:--|');
     for (const f of shown) {
-        rows.push(`| \`${escapeCell(f.path)}\` | ${escapeCell(f.status)} |`);
+        rows.push(`| \`${escapeCell(f.path)}\` | ${statusBadge(f.status)} |`);
     }
     if (files.length > shown.length) {
         rows.push('');
@@ -35364,7 +35443,7 @@ function renderBlastRadius(blast, detail) {
     rows.push('### Blast Radius');
     rows.push('');
     rows.push('| Depth | Count |');
-    rows.push('|---|---|');
+    rows.push('|---|--:|');
     rows.push(`| d1 (direct)     | ${blast.d1Symbols.length} |`);
     rows.push(`| d2 (indirect)   | ${blast.d2Symbols.length} |`);
     rows.push(`| d3 (transitive) | ${blast.d3Symbols.length} |`);
@@ -35392,12 +35471,15 @@ function appendDetails(rows, summary, symbols) {
     rows.push('');
     rows.push('</details>');
 }
+/**
+ * @brief: Render the Symbol Changes table (`| Kind | Symbol | Location |`).
+ *         No section header — the caller wraps it in a collapsible block
+ *         whose summary carries the count. Capped per detail level.
+ */
 function renderSymbolChanges(symbols, detail) {
     const cap = detail === 'capped' ? TOP_N_SYMBOL_ROWS : detail === 'minimal' ? 10 : symbols.length;
     const shown = symbols.slice(0, cap);
     const rows = [];
-    rows.push('### Symbol Changes');
-    rows.push('');
     rows.push('| Kind | Symbol | Location |');
     rows.push('|---|---|---|');
     for (const s of shown) {
@@ -35430,15 +35512,18 @@ function renderApiSurfaceDelta(symbols) {
     }
     return rows.join('\n');
 }
+/**
+ * @brief: Render the File Risk table. No section header — the caller wraps
+ *         it in a collapsible block. Risk and status render as
+ *         emoji-prefixed badges; all Hub strings pass through escapeCell.
+ */
 function renderRiskFiles(riskFiles) {
     const top = riskFiles.slice(0, TOP_N_RISK_FILES);
     const rows = [];
-    rows.push('### File Risk');
-    rows.push('');
     rows.push('| File | Risk | Status | Category |');
-    rows.push('|---|---|---|---|');
+    rows.push('|---|:--|:--|---|');
     for (const f of top) {
-        rows.push(`| \`${escapeCell(f.path)}\` | ${f.risk} | ${escapeCell(f.status)} | ${escapeCell(f.category ?? '')} |`);
+        rows.push(`| \`${escapeCell(f.path)}\` | ${riskBadge(f.risk)} | ${statusBadge(f.status)} | ${escapeCell(f.category ?? '')} |`);
     }
     if (riskFiles.length > top.length) {
         rows.push('');
@@ -35453,11 +35538,11 @@ function appendFooter(parts, blast, hubUrl, truncated) {
     if (blast.fileRiskLevel)
         bits.push(`file risk \`${blast.fileRiskLevel}\``);
     bits.push(`computed \`${blast.computedAt}\``);
-    bits.push(`[GitNexus Hub](${hubUrl})`);
-    parts.push(`_${bits.join(' · ')}_`);
+    bits.push(`<a href="${hubUrl}">GitNexus Hub</a>`);
+    parts.push(`<sub>${bits.join(' · ')}</sub>`);
     if (truncated) {
         parts.push('');
-        parts.push('_Comment truncated — full results on the Hub._');
+        parts.push('<sub>_Comment truncated — full results on the Hub._</sub>');
     }
 }
 /**

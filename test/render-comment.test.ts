@@ -26,7 +26,7 @@ describe('renderComment — marker + heading', () => {
 
   it('includes the PR number heading', () => {
     const out = renderComment(loadBlast('blast-result-empty.json'), OPTS);
-    expect(out).toContain('## GitNexus Review: PR #42');
+    expect(out).toContain('GitNexus Review · PR #42');
   });
 
   it('always includes a footer with the hub URL', () => {
@@ -48,7 +48,7 @@ describe('renderComment — full fixture (real Hub response)', () => {
   it('renders Architecture Impact when modules present', () => {
     const out = renderComment(loadBlast('blast-result-full.json'), OPTS);
     expect(out).toContain('### Architecture Impact');
-    expect(out).toContain('| `Scripts` | 2 | no |');
+    expect(out).toContain('| `Scripts` | 2 | ⚪ |');
   });
 
   it('renders Blast Radius counts including zeros', () => {
@@ -61,7 +61,7 @@ describe('renderComment — full fixture (real Hub response)', () => {
 
   it('renders Symbol Changes table', () => {
     const out = renderComment(loadBlast('blast-result-full.json'), OPTS);
-    expect(out).toContain('### Symbol Changes');
+    expect(out).toContain('Symbol Changes');
     expect(out).toContain('`generateCode`');
     expect(out).toContain('gitnexus-hub/scripts/create-invite.ts:14');
   });
@@ -165,7 +165,7 @@ describe('renderComment — affected flows', () => {
 
   it('suppresses the Affected Flows section when there are no flows', () => {
     const out = renderComment(loadBlast('blast-result-full.json'), OPTS);
-    expect(out).not.toContain('### Affected Flows');
+    expect(out).not.toContain('Affected Flows');
   });
 
   it('escapes pipe and newline characters in flow names', () => {
@@ -238,9 +238,9 @@ describe('renderComment — affected flows', () => {
 describe('renderComment — changed files', () => {
   it('renders the Changed Files table from the full fixture', () => {
     const out = renderComment(loadBlast('blast-result-full.json'), OPTS);
-    expect(out).toContain('### Changed Files');
+    expect(out).toContain('Changed Files');
     expect(out).toContain('| File | Status |');
-    expect(out).toContain('| `gitnexus-hub/src/routes/admin.ts` | modified |');
+    expect(out).toContain('| `gitnexus-hub/src/routes/admin.ts` | 🟡 modified |');
   });
 
   it('still renders Changed Files on an otherwise-empty (docs-only) PR', () => {
@@ -266,8 +266,8 @@ describe('renderComment — changed files', () => {
     });
     const out = renderComment(blast, OPTS);
     expect(out).toContain('No symbol changes, blast radius, architecture impact');
-    expect(out).toContain('### Changed Files');
-    expect(out).toContain('| `README.md` | modified |');
+    expect(out).toContain('Changed Files');
+    expect(out).toContain('| `README.md` | 🟡 modified |');
   });
 
   it('escapes pipe characters in file paths and statuses', () => {

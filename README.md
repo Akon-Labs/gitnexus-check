@@ -19,11 +19,18 @@ in place when you push more commits.
 
 ## What you get in the comment
 
+- **Verdict headline**: the blast level plus a one-line rationale (dependent-symbol count,
+  modules touched, flows affected, and a "review carefully" note when the level is high).
 - **Blast level** for the PR: `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`.
+- **Architecture impact**: which modules of your codebase are touched, ranked by hit count.
+- **Affected flows**: the execution flows (processes) the change reaches, ranked by hits.
 - **Blast radius**: direct, indirect, and transitive callers of the symbols you changed.
 - **Symbol changes**: every function, class, or type the PR adds, modifies, or removes.
 - **API surface**: routes, exports, and signatures that moved (the stuff your consumers see).
-- **Architecture impact**: which modules of your codebase are touched, ranked by hit count.
+- **Changed files**: every file in the diff with its status (added / modified / removed).
+- **File risk**: non-graph files (migrations, CI, infra, config) flagged by risk category.
+
+Sections render only when they have data — a docs-only PR won't show a Blast Radius table.
 
 GNX_TOKEN can be Aquired [here](https://app.akonlabs.com/)
 
@@ -83,6 +90,7 @@ jobs:
         with:
           hub-url: https://gitnexus-enterprise-production.up.railway.app
           token: ${{ secrets.GITNEXUS_TOKEN }}
+```
 
 That writes `.github/workflows/gitnexus.yml` for you with everything filled in.
 
@@ -93,15 +101,78 @@ Then add `GITNEXUS_TOKEN` as a repo secret in GitHub:
 Generate the token from your profile at [akonlabs.com](https://akonlabs.com), paste it,
 save. Open a PR and the comment shows up.
 
-## Build and test (contributors)
+## Inputs
+
+| Input | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `hub-url` | yes | — | GitNexus Hub base URL (e.g. `https://app.akonlabs.com`). |
+| `token` | yes | — | GitNexus CI token (`gnx_…`). Store as a repo secret and pass it in. |
+| `github-token` | no | `${{ github.token }}` | Token used to post the PR comment. |
+| `fail-on-blast-level` | no | `''` (off) | Optional merge gate. See below. |
+
+## Outputs
+
+| Output | Description |
+|--------|-------------|
+| `comment-id` | The GitHub comment id created or updated. |
+| `blast-level` | The PR blast level: `LOW` \| `MEDIUM` \| `HIGH` \| `CRITICAL`. |
+| `gate-decision` | `pass` \| `fail` \| `neutral`. `neutral` means advisory (no gate set). |
+
+## Optional: the merge gate (`fail-on-blast-level`)
+
+By default the action is **advisory** — it always posts the comment and the check stays
+green. Set `fail-on-blast-level` to turn it into a **gate** that fails the workflow when
+the PR's blast level meets or exceeds your threshold. The comment is always posted first,
+so a red check always has an explanation attached.
+
+```yaml
+- uses: Akon-Labs/gitnexus-check@release
+  with:
+    hub-url: https://gitnexus-enterprise-production.up.railway.app
+    token: ${{ secrets.GITNEXUS_TOKEN }}
+    fail-on-blast-level: CRITICAL   # block only on CRITICAL; omit for advisory
 ```
 
+Threshold is **meets-or-exceeds**: `fail-on-blast-level: HIGH` fails on both `HIGH` and
+`CRITICAL`. Accepted values are `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` (case-sensitive); an
+empty value (the default) keeps the action advisory.
+
+To make the gate actually block merges, mark the GitNexus check as **required** in your
+branch protection rules (**Settings → Branches → Branch protection rules**).
+
+### Verifying the gate
+
+Run these against a PR you know is `CRITICAL` to confirm each state:
+
+```bash
+# 1. Gate fails on a CRITICAL PR (job goes red, comment still posts):
+#    set `fail-on-blast-level: CRITICAL` in the workflow, then re-run the action.
+#    Expect the log line:
+#      GitNexus gate: blast level CRITICAL meets or exceeds threshold CRITICAL. See PR comment.
+#    and the step output gate-decision = fail.
+
+# 2. Meets-or-exceeds still fails:
+#    set `fail-on-blast-level: HIGH` -> still red on a CRITICAL PR.
+
+# 3. Advisory passes:
+#    remove `fail-on-blast-level` entirely -> job green, gate-decision = neutral.
+
+# 4. Pass path (optional):
+#    run on a LOW/MEDIUM PR with `fail-on-blast-level: CRITICAL`
+#    -> job green, gate-decision = pass.
+
+# Read the gate-decision output from a later workflow step:
+#   - id: review
+#     uses: Akon-Labs/gitnexus-check@release
+#     with: { hub-url: ..., token: ..., fail-on-blast-level: CRITICAL }
+#   - run: echo "gate said ${{ steps.review.outputs.gate-decision }}"
+```
 
 ## Development and Contributing
 ```bash
 npm install
-npm run lint        # type-check
-npm run test        # vitest, 81 tests
+npm run lint        # type-check (tsc --noEmit)
+npm run test        # vitest
 npm run build       # ncc bundle into dist/
 npm run check-dist  # verify dist/ matches a fresh build
 ```
