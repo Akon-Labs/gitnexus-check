@@ -150,7 +150,12 @@ export function isBlastResult(value: unknown): value is BlastResult {
   // stale + prStatus arrived later in the Hub schema; older deployments
   // may omit them. Accept either shape so the Action keeps working across
   // a window of Hub versions; renderer fills defaults.
-  if ('stale' in value && typeof value.stale !== 'boolean' && value.stale !== undefined) {
+  if (
+    'stale' in value &&
+    value.stale !== null &&
+    value.stale !== undefined &&
+    typeof value.stale !== 'boolean'
+  ) {
     return false;
   }
 

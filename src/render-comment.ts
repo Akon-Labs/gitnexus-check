@@ -668,11 +668,14 @@ function formatLocation(symbol: SymbolRef): string {
 
 /**
  * @brief: Defensively escape characters that would break a markdown table
- *         cell. The Hub-supplied strings (file paths, symbol names,
- *         module names) are untrusted-input-ish in the security-model
- *         sense — they come from the user's own repo but flow through our
- *         renderer; we treat them conservatively.
+ *         cell or inline code span. The Hub-supplied strings (file paths,
+ *         symbol names, module names) are untrusted-input-ish in the
+ *         security-model sense — they come from the user's own repo but
+ *         flow through our renderer; we treat them conservatively.
+ *
+ *         Backticks are replaced (not backslash-escaped) because GFM code
+ *         spans delimited by a single ` cannot contain literal backticks.
  */
 function escapeCell(value: string): string {
-  return value.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+  return value.replace(/\|/g, '\\|').replace(/`/g, "'").replace(/\r?\n/g, ' ');
 }

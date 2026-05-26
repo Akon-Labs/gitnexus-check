@@ -82,6 +82,28 @@ describe('isBlastResult', () => {
     ).toBe(true);
   });
 
+  it('tolerates stale: null from older Hub rows without the column backfilled', () => {
+    expect(
+      isBlastResult({
+        blastLevel: 'LOW',
+        truncated: false,
+        computedAt: 'x',
+        stale: null,
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects when stale is a non-boolean non-null value', () => {
+    expect(
+      isBlastResult({
+        blastLevel: 'LOW',
+        truncated: false,
+        computedAt: 'x',
+        stale: 'yes',
+      }),
+    ).toBe(false);
+  });
+
   it('rejects when graphData is a non-object', () => {
     expect(
       isBlastResult({
@@ -113,6 +135,16 @@ describe('normalizeBlastResult', () => {
     expect(out.graphData).toEqual({ nodes: [], links: [] });
     expect(out.stale).toBe(false);
     expect(out.prTitle).toBeNull();
+  });
+
+  it('treats stale: null as false', () => {
+    const v = {
+      blastLevel: 'LOW',
+      truncated: false,
+      computedAt: 'x',
+      stale: null,
+    } as unknown as BlastResult;
+    expect(normalizeBlastResult(v).stale).toBe(false);
   });
 
   it('clamps unknown blastLevel to LOW', () => {

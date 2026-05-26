@@ -32,7 +32,7 @@ in place when you push more commits.
 
 Sections render only when they have data — a docs-only PR won't show a Blast Radius table.
 
-GNX_TOKEN can be Aquired [here](https://app.akonlabs.com/)
+GNX_TOKEN can be Acquired [here](https://app.akonlabs.com/)
 
 ## How to use it
 
@@ -66,7 +66,7 @@ gnx connect {GITNEXUS_TOKEN} --editor opencode
 ## To get started
 1) Create a gitnexus.yml file in your repo,
 2) Ensure the repo is indexed on either app.akonlabs.com or via the gitnexushub cli -> [Find out more here](https://akonlabs.com)
-3) Create PR on the branc specified in the list in `.github/workflows/gitnexus.yml`
+3) Create PR on the branch specified in the list in `.github/workflows/gitnexus.yml`
 
 ## Example `.github/workflows/gitnexus.yml`
 
@@ -140,16 +140,6 @@ empty value (the default) keeps the action advisory.
 To make the gate actually block merges, mark the GitNexus check as **required** in your
 branch protection rules (**Settings → Branches → Branch protection rules**).
 
-## Development and Contributing
-```bash
-npm install
-npm run lint        # type-check (tsc --noEmit)
-npm run test        # vitest
-npm run build       # ncc bundle into dist/
-npm run check-dist  # verify dist/ matches a fresh build
-```
-
----
 
 <div align="center">
 

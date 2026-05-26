@@ -484,4 +484,41 @@ describe('renderComment — escaping', () => {
     expect(out).toContain('evil\\|name');
     expect(out).toContain('src/a\\|b.ts');
   });
+
+  it('replaces backticks so inline code spans stay intact', () => {
+    const blast = normalizeBlastResult({
+      blastLevel: 'LOW',
+      changedSymbols: [
+        {
+          id: 'x',
+          name: 'foo`bar',
+          type: 'Function',
+          filePath: 'src/`dir`/file.ts',
+          startLine: 1,
+          endLine: 2,
+        },
+      ],
+      d1Symbols: [],
+      d2Symbols: [],
+      d3Symbols: [],
+      affectedFlows: [],
+      affectedModules: [{ name: 'mod`ule', hits: 1, direct: true }],
+      changedFiles: [],
+      fileRiskLevel: null,
+      riskFiles: [],
+      graphData: { nodes: [], links: [] },
+      truncated: false,
+      stale: false,
+      prTitle: null,
+      prAuthor: null,
+      prBranch: null,
+      prStatus: null,
+      computedAt: '2026-05-17T00:00:00.000Z',
+    });
+    const out = renderComment(blast, OPTS);
+    expect(out).toContain('`foo\'bar`');
+    expect(out).toContain('`src/\'dir\'/file.ts:1`');
+    expect(out).toContain('| `mod\'ule` |');
+    expect(out).not.toContain('`foo`bar`');
+  });
 });
