@@ -34,6 +34,15 @@ export const COMMENT_MARKER = '<!-- gitnexus-review-v1 -->';
  */
 export const CHAR_BUDGET = 60_000;
 
+/**
+ * @brief: Embeddable (raw) URL for the Akon Labs logo in the comment header.
+ *         The comment lands in the *consumer's* repo, so a relative path
+ *         would not resolve. Must be a raw URL (not a /blob/ page URL) so it
+ *         renders inside an <img>; pinned to the public `release` branch.
+ */
+const LOGO_URL =
+  'https://raw.githubusercontent.com/Akon-Labs/gitnexus-check/release/.github/assets/akonlabs-logo.png';
+
 const TOP_N_BLAST_LIST = 20;
 const TOP_N_MODULE_ROWS = 20;
 const TOP_N_SYMBOL_ROWS = 50;
@@ -147,7 +156,7 @@ function buildBody(
 }
 
 /**
- * @brief: Centered header block: the Akon Labs logo above the review title.
+ * @brief: Centered header block with the review title.
  *
  * @params: (prNumber: number) -> GitHub PR number for the title.
  * @returns: string — an HTML-centered markdown block.
@@ -155,6 +164,8 @@ function buildBody(
 function renderHeader(prNumber: number): string {
   return [
     '<div align="center">',
+    '',
+    `<img src="${LOGO_URL}" alt="Akon Labs" width="88" />`,
     '',
     `### GitNexus Review · PR #${prNumber}`,
     '',
@@ -293,7 +304,7 @@ function buildHeadline(blast: BlastResult): string {
   if (flows > 0) bits.push(`${flows} flow${flows === 1 ? '' : 's'} affected`);
   const rationale = levelRationale(blast.blastLevel);
   if (rationale) bits.push(rationale);
-  if (blast.stale) bits.push('_(stale — re-run for fresh analysis)_');
+  if (blast.stale) bits.push('_(stale, re-run for fresh analysis)_');
   return bits.join(' · ');
 }
 
@@ -305,11 +316,11 @@ function buildHeadline(blast: BlastResult): string {
 function levelRationale(level: BlastLevel): string {
   switch (level) {
     case 'CRITICAL':
-      return '_(critical surface — review carefully before merge)_';
+      return '_(critical surface, review carefully before merge)_';
     case 'HIGH':
-      return '_(high reach — verify dependents)_';
+      return '_(high reach, verify dependents)_';
     case 'MEDIUM':
-      return '_(moderate reach — spot-check dependents)_';
+      return '_(moderate reach, spot-check dependents)_';
     default:
       return '';
   }
@@ -410,7 +421,7 @@ function renderAffectedFlows(flows: AffectedFlow[], detail: DetailLevel): string
   rows.push('| Process | Hits |');
   rows.push('|---|--:|');
   for (const f of shown) {
-    const hits = typeof f.hitCount === 'number' ? String(f.hitCount) : '—';
+    const hits = typeof f.hitCount === 'number' ? String(f.hitCount) : 'n/a';
     rows.push(`| ${escapeCell(flowName(f))} | ${hits} |`);
   }
   if (sorted.length > shown.length) {
@@ -482,7 +493,7 @@ function appendDetails(rows: string[], summary: string, symbols: SymbolRef[]): v
   rows.push('');
   for (const s of top) {
     const loc = formatLocation(s);
-    rows.push(`- ${loc} — \`${escapeCell(s.name)}\``);
+    rows.push(`- ${loc} · \`${escapeCell(s.name)}\``);
   }
   if (symbols.length > top.length) {
     rows.push(`- _(${symbols.length - top.length} more)_`);
@@ -582,7 +593,7 @@ function renderRecommendations(blast: BlastResult): string {
   const d1 = blast.d1Symbols.length;
   if (d1 >= 15) {
     tips.push(
-      `**${d1} direct dependents.** The changed symbols are widely called — keep changes backwards-compatible (additive over breaking). If a signature must change, add a thin wrapper that preserves the old one so callers don't all need updating in this PR.`,
+      `**${d1} direct dependents.** The changed symbols are widely called, so keep changes backwards-compatible (additive over breaking). If a signature must change, add a thin wrapper that preserves the old one so callers don't all need updating in this PR.`,
     );
   }
 
@@ -612,7 +623,7 @@ function renderRecommendations(blast: BlastResult): string {
   if (risky.length > 0) {
     const names = risky.slice(0, 3).map((f) => `\`${escapeCell(f.path)}\``).join(', ');
     tips.push(
-      `**Also changes ${risky.length} high-risk file${risky.length === 1 ? '' : 's'}** (${names}). Move migration/CI/infra changes into a separate PR so a logic bug can't block them — and vice versa.`,
+      `**Also changes ${risky.length} high-risk file${risky.length === 1 ? '' : 's'}** (${names}). Move migration/CI/infra changes into a separate PR so a logic bug can't block them, and vice versa.`,
     );
   }
 

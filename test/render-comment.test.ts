@@ -163,7 +163,7 @@ describe('renderComment — affected flows', () => {
     // Sorted by hitCount desc: the 7-hit flow appears before the 3-hit flow.
     expect(out.indexOf('Indexing Queue Lifecycle')).toBeLessThan(out.indexOf('Invite Issuance'));
     // Minimal entry (only processId) falls back to its id with an em-dash hit cell.
-    expect(out).toContain('| proc-orphan | — |');
+    expect(out).toContain('| proc-orphan | n/a |');
   });
 
   it('suppresses the Affected Flows section when there are no flows', () => {
@@ -338,7 +338,7 @@ describe('renderComment — verdict', () => {
       computedAt: '2026-05-17T00:00:00.000Z',
     });
     const out = renderComment(blast, OPTS);
-    expect(out).toContain('stale — re-run for fresh analysis');
+    expect(out).toContain('stale, re-run for fresh analysis');
     expect(out).toContain('moderate reach');
   });
 

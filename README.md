@@ -92,7 +92,7 @@ jobs:
           token: ${{ secrets.GITNEXUS_TOKEN }}
 ```
 
-That writes `.github/workflows/gitnexus.yml` for you with everything filled in.
+Use that for an example in your`.github/workflows/gitnexus.yml` and add to the branch you want to have the action.
 
 Then add `GITNEXUS_TOKEN` as a repo secret in GitHub:
 
@@ -139,34 +139,6 @@ empty value (the default) keeps the action advisory.
 
 To make the gate actually block merges, mark the GitNexus check as **required** in your
 branch protection rules (**Settings → Branches → Branch protection rules**).
-
-### Verifying the gate
-
-Run these against a PR you know is `CRITICAL` to confirm each state:
-
-```bash
-# 1. Gate fails on a CRITICAL PR (job goes red, comment still posts):
-#    set `fail-on-blast-level: CRITICAL` in the workflow, then re-run the action.
-#    Expect the log line:
-#      GitNexus gate: blast level CRITICAL meets or exceeds threshold CRITICAL. See PR comment.
-#    and the step output gate-decision = fail.
-
-# 2. Meets-or-exceeds still fails:
-#    set `fail-on-blast-level: HIGH` -> still red on a CRITICAL PR.
-
-# 3. Advisory passes:
-#    remove `fail-on-blast-level` entirely -> job green, gate-decision = neutral.
-
-# 4. Pass path (optional):
-#    run on a LOW/MEDIUM PR with `fail-on-blast-level: CRITICAL`
-#    -> job green, gate-decision = pass.
-
-# Read the gate-decision output from a later workflow step:
-#   - id: review
-#     uses: Akon-Labs/gitnexus-check@release
-#     with: { hub-url: ..., token: ..., fail-on-blast-level: CRITICAL }
-#   - run: echo "gate said ${{ steps.review.outputs.gate-decision }}"
-```
 
 ## Development and Contributing
 ```bash

@@ -35088,6 +35088,13 @@ exports.COMMENT_MARKER = '<!-- gitnexus-review-v1 -->';
  *         drift introduced by `Buffer.byteLength` vs `.length`.
  */
 exports.CHAR_BUDGET = 60_000;
+/**
+ * @brief: Embeddable (raw) URL for the Akon Labs logo in the comment header.
+ *         The comment lands in the *consumer's* repo, so a relative path
+ *         would not resolve. Must be a raw URL (not a /blob/ page URL) so it
+ *         renders inside an <img>; pinned to the public `release` branch.
+ */
+const LOGO_URL = 'https://raw.githubusercontent.com/Akon-Labs/gitnexus-check/release/.github/assets/akonlabs-logo.png';
 const TOP_N_BLAST_LIST = 20;
 const TOP_N_MODULE_ROWS = 20;
 const TOP_N_SYMBOL_ROWS = 50;
@@ -35174,7 +35181,7 @@ function buildBody(blast, opts, cfg) {
     return parts.join('\n');
 }
 /**
- * @brief: Centered header block: the Akon Labs logo above the review title.
+ * @brief: Centered header block with the review title.
  *
  * @params: (prNumber: number) -> GitHub PR number for the title.
  * @returns: string — an HTML-centered markdown block.
@@ -35182,6 +35189,8 @@ function buildBody(blast, opts, cfg) {
 function renderHeader(prNumber) {
     return [
         '<div align="center">',
+        '',
+        `<img src="${LOGO_URL}" alt="Akon Labs" width="88" />`,
         '',
         `### GitNexus Review · PR #${prNumber}`,
         '',
@@ -35297,7 +35306,7 @@ function buildHeadline(blast) {
     if (rationale)
         bits.push(rationale);
     if (blast.stale)
-        bits.push('_(stale — re-run for fresh analysis)_');
+        bits.push('_(stale, re-run for fresh analysis)_');
     return bits.join(' · ');
 }
 /**
@@ -35308,11 +35317,11 @@ function buildHeadline(blast) {
 function levelRationale(level) {
     switch (level) {
         case 'CRITICAL':
-            return '_(critical surface — review carefully before merge)_';
+            return '_(critical surface, review carefully before merge)_';
         case 'HIGH':
-            return '_(high reach — verify dependents)_';
+            return '_(high reach, verify dependents)_';
         case 'MEDIUM':
-            return '_(moderate reach — spot-check dependents)_';
+            return '_(moderate reach, spot-check dependents)_';
         default:
             return '';
     }
@@ -35398,7 +35407,7 @@ function renderAffectedFlows(flows, detail) {
     rows.push('| Process | Hits |');
     rows.push('|---|--:|');
     for (const f of shown) {
-        const hits = typeof f.hitCount === 'number' ? String(f.hitCount) : '—';
+        const hits = typeof f.hitCount === 'number' ? String(f.hitCount) : 'n/a';
         rows.push(`| ${escapeCell(flowName(f))} | ${hits} |`);
     }
     if (sorted.length > shown.length) {
@@ -35468,7 +35477,7 @@ function appendDetails(rows, summary, symbols) {
     rows.push('');
     for (const s of top) {
         const loc = formatLocation(s);
-        rows.push(`- ${loc} — \`${escapeCell(s.name)}\``);
+        rows.push(`- ${loc} · \`${escapeCell(s.name)}\``);
     }
     if (symbols.length > top.length) {
         rows.push(`- _(${symbols.length - top.length} more)_`);
@@ -35555,7 +35564,7 @@ function renderRecommendations(blast) {
     const tips = [];
     const d1 = blast.d1Symbols.length;
     if (d1 >= 15) {
-        tips.push(`**${d1} direct dependents.** The changed symbols are widely called — keep changes backwards-compatible (additive over breaking). If a signature must change, add a thin wrapper that preserves the old one so callers don't all need updating in this PR.`);
+        tips.push(`**${d1} direct dependents.** The changed symbols are widely called, so keep changes backwards-compatible (additive over breaking). If a signature must change, add a thin wrapper that preserves the old one so callers don't all need updating in this PR.`);
     }
     const moduleCount = blast.affectedModules.length;
     const directModules = blast.affectedModules.filter((m) => m.direct).length;
@@ -35573,7 +35582,7 @@ function renderRecommendations(blast) {
     const risky = blast.riskFiles.filter((f) => f.risk === 'HIGH' || f.risk === 'CRITICAL');
     if (risky.length > 0) {
         const names = risky.slice(0, 3).map((f) => `\`${escapeCell(f.path)}\``).join(', ');
-        tips.push(`**Also changes ${risky.length} high-risk file${risky.length === 1 ? '' : 's'}** (${names}). Move migration/CI/infra changes into a separate PR so a logic bug can't block them — and vice versa.`);
+        tips.push(`**Also changes ${risky.length} high-risk file${risky.length === 1 ? '' : 's'}** (${names}). Move migration/CI/infra changes into a separate PR so a logic bug can't block them, and vice versa.`);
     }
     if (blast.changedFiles.length >= 40) {
         tips.push(`**Large PR (${blast.changedFiles.length} files).** Smaller, focused PRs review faster and carry a narrower blast radius.`);
