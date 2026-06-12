@@ -35623,13 +35623,16 @@ function formatLocation(symbol) {
 }
 /**
  * @brief: Defensively escape characters that would break a markdown table
- *         cell. The Hub-supplied strings (file paths, symbol names,
- *         module names) are untrusted-input-ish in the security-model
- *         sense — they come from the user's own repo but flow through our
- *         renderer; we treat them conservatively.
+ *         cell or inline code span. The Hub-supplied strings (file paths,
+ *         symbol names, module names) are untrusted-input-ish in the
+ *         security-model sense — they come from the user's own repo but
+ *         flow through our renderer; we treat them conservatively.
+ *
+ *         Backticks are replaced (not backslash-escaped) because GFM code
+ *         spans delimited by a single ` cannot contain literal backticks.
  */
 function escapeCell(value) {
-    return value.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+    return value.replace(/\|/g, '\\|').replace(/`/g, "'").replace(/\r?\n/g, ' ');
 }
 
 
@@ -35661,10 +35664,25 @@ function escapeCell(value) {
  * @params: (stale)           -> Computed against an older indexed commit than the current HEAD.
  * @params: (prTitle/prAuthor/prBranch/prStatus) -> PR-level metadata; either party may set null.
  * @params: (computedAt)      -> ISO timestamp when the Hub last computed the result.
+ * @params: (crossRepo)       -> Cross-repo blast envelope; optional for back-compat with older Hub builds. Accepted + preserved here, rendered later.
  */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.EMPTY_CROSS_REPO = void 0;
 exports.isBlastResult = isBlastResult;
 exports.normalizeBlastResult = normalizeBlastResult;
+/**
+ * @brief: Zero-state cross-repo envelope. Byte-matches the Hub's own
+ *         zero-state literal in routes/blast.ts so an Action that fills a
+ *         missing `crossRepo` produces exactly what a fresh Hub would have
+ *         sent for a repo with no ready groups.
+ */
+exports.EMPTY_CROSS_REPO = {
+    schemaVersion: '1',
+    findings: [],
+    groups: [],
+    truncated: false,
+    error: null,
+};
 /**
  * @brief: Validate that an unknown value matches the BlastResult shape we
  *         expect from the Hub. Tolerates absent arrays (treats them as []
@@ -35689,7 +35707,10 @@ function isBlastResult(value) {
     // stale + prStatus arrived later in the Hub schema; older deployments
     // may omit them. Accept either shape so the Action keeps working across
     // a window of Hub versions; renderer fills defaults.
-    if ('stale' in value && typeof value.stale !== 'boolean' && value.stale !== undefined) {
+    if ('stale' in value &&
+        value.stale !== null &&
+        value.stale !== undefined &&
+        typeof value.stale !== 'boolean') {
         return false;
     }
     const arrayFields = [
@@ -35718,6 +35739,19 @@ function isBlastResult(value) {
     // graphData is optional in old Hub builds and always present in new ones.
     if ('graphData' in value && value.graphData !== null && value.graphData !== undefined) {
         if (!isObject(value.graphData))
+            return false;
+    }
+    // crossRepo arrived later in the Hub schema; older deployments omit it.
+    // Shallow tolerance only — when present, require an object whose findings
+    // and groups (if present) are arrays. The per-finding shape is the
+    // renderer's concern, so we do NOT validate beyond that.
+    if ('crossRepo' in value && value.crossRepo !== null && value.crossRepo !== undefined) {
+        if (!isObject(value.crossRepo))
+            return false;
+        const { findings, groups } = value.crossRepo;
+        if (findings !== null && findings !== undefined && !Array.isArray(findings))
+            return false;
+        if (groups !== null && groups !== undefined && !Array.isArray(groups))
             return false;
     }
     return true;
@@ -35749,6 +35783,7 @@ function normalizeBlastResult(value) {
         fileRiskLevel: clampOptionalBlastLevel(value.fileRiskLevel),
         riskFiles: value.riskFiles ?? [],
         graphData: value.graphData ?? { nodes: [], links: [] },
+        crossRepo: normalizeCrossRepo(value.crossRepo),
         truncated: Boolean(value.truncated),
         stale: Boolean(value.stale),
         prTitle: value.prTitle ?? null,
@@ -35760,6 +35795,32 @@ function normalizeBlastResult(value) {
 }
 function isObject(v) {
     return typeof v === 'object' && v !== null;
+}
+/**
+ * @brief: Coerce an unknown `crossRepo` value into a well-formed
+ *         CrossRepoResult so the renderer can read it without `??` on every
+ *         field. Returns EMPTY_CROSS_REPO when the value is absent or not an
+ *         object; otherwise fills each field with a type-checked default.
+ *         `findings`/`groups` are passed through verbatim when they are arrays.
+ *
+ *         Intentionally NOT version-aware: `schemaVersion` is preserved as-is
+ *         (defaulting to '1' only when non-string). "Degrade on unknown
+ *         version" logic is deferred to the renderer PR.
+ *
+ * @params: (v: unknown) -> The `crossRepo` field off a Hub response body.
+ *
+ * @returns: CrossRepoResult — always a complete envelope.
+ */
+function normalizeCrossRepo(v) {
+    if (!isObject(v))
+        return exports.EMPTY_CROSS_REPO;
+    return {
+        schemaVersion: typeof v.schemaVersion === 'string' ? v.schemaVersion : '1',
+        findings: Array.isArray(v.findings) ? v.findings : [],
+        groups: Array.isArray(v.groups) ? v.groups : [],
+        truncated: Boolean(v.truncated),
+        error: typeof v.error === 'string' ? v.error : null,
+    };
 }
 function clampBlastLevel(v) {
     return v === 'LOW' || v === 'MEDIUM' || v === 'HIGH' || v === 'CRITICAL' ? v : 'LOW';

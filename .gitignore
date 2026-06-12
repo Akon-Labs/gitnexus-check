@@ -9,3 +9,4 @@ arch/
 # Allow committing the ncc-built action bundle (root .gitignore excludes dist/).
 !dist/
 !dist/**
+.gitnexus

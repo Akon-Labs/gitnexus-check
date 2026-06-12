@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import {
   isBlastResult,
   normalizeBlastResult,
+  EMPTY_CROSS_REPO,
   type BlastResult,
 } from '../src/types/blast-result';
 
@@ -114,6 +115,33 @@ describe('isBlastResult', () => {
       }),
     ).toBe(false);
   });
+
+  it('accepts a fixture with a populated crossRepo envelope', () => {
+    const cross = loadFixture('blast-result-cross-repo.json');
+    expect(isBlastResult(cross)).toBe(true);
+  });
+
+  it('rejects when crossRepo is present as a string', () => {
+    expect(
+      isBlastResult({
+        blastLevel: 'LOW',
+        truncated: false,
+        computedAt: 'x',
+        crossRepo: 'oops',
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects when crossRepo.findings is a non-array', () => {
+    expect(
+      isBlastResult({
+        blastLevel: 'LOW',
+        truncated: false,
+        computedAt: 'x',
+        crossRepo: { schemaVersion: '1', findings: 'x', groups: [], truncated: false, error: null },
+      }),
+    ).toBe(false);
+  });
 });
 
 describe('normalizeBlastResult', () => {
@@ -173,6 +201,29 @@ describe('normalizeBlastResult', () => {
       computedAt: 'x',
     } as unknown as BlastResult;
     expect(normalizeBlastResult(v).fileRiskLevel).toBeNull();
+  });
+
+  it('round-trips a populated crossRepo envelope, preserving findings and groups', () => {
+    const cross = loadFixture('blast-result-cross-repo.json');
+    expect(isBlastResult(cross)).toBe(true);
+    const out = normalizeBlastResult(cross as BlastResult);
+    expect(out.crossRepo).toBeDefined();
+    expect(out.crossRepo?.schemaVersion).toBe('1');
+    expect(out.crossRepo?.findings).toHaveLength(1);
+    expect(out.crossRepo?.groups).toHaveLength(1);
+    const [finding] = out.crossRepo?.findings as Array<{ consumerRepo: string }>;
+    expect(finding.consumerRepo).toBe('acme/widget-web');
+    const [group] = out.crossRepo?.groups as Array<{ name: string }>;
+    expect(group.name).toBe('Acme Platform');
+  });
+
+  it('fills a missing crossRepo with the EMPTY_CROSS_REPO zero-state', () => {
+    const v = {
+      blastLevel: 'LOW',
+      truncated: false,
+      computedAt: 'x',
+    } as unknown as BlastResult;
+    expect(normalizeBlastResult(v).crossRepo).toEqual(EMPTY_CROSS_REPO);
   });
 });
 

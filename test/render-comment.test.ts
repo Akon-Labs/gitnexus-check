@@ -448,6 +448,40 @@ describe('renderComment — recommendations', () => {
   });
 });
 
+describe('renderComment — crossRepo backward-compat', () => {
+  it('produces byte-identical output whether or not crossRepo is present', () => {
+    // The renderer must ignore the new crossRepo envelope entirely (rendering
+    // is a later PR). Injecting a populated crossRepo must not perturb output.
+    const base = loadBlast('blast-result-full.json');
+    const withCross = normalizeBlastResult({
+      ...base,
+      crossRepo: {
+        schemaVersion: '1',
+        findings: [
+          {
+            kind: 'symbol',
+            consumerRepo: 'acme/widget-web',
+            consumerSymbol: { name: 'fetchBlast', filePath: 'src/api/blast.ts' },
+            providerSymbol: {
+              name: 'generateCode',
+              filePath: 'gitnexus-hub/scripts/create-invite.ts',
+              symbolLabel: 'Function',
+            },
+            via: 'imports generateCode',
+            edgeType: 'IMPORTS',
+            detectionTier: 'static',
+            confidence: 0.9,
+          },
+        ],
+        groups: [{ id: 'grp-001', name: 'Acme Platform', lastAnalyzedAt: null, stale: false }],
+        truncated: false,
+        error: null,
+      },
+    });
+    expect(renderComment(withCross, OPTS)).toBe(renderComment(base, OPTS));
+  });
+});
+
 describe('renderComment — escaping', () => {
   it('escapes pipe characters in module / symbol names', () => {
     const blast = normalizeBlastResult({
