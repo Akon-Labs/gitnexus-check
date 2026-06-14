@@ -102,29 +102,85 @@ export interface BlastGraphData {
 }
 
 /**
+ * @brief: A consumer in another repo references a symbol changed in this PR.
+ *         `kind` is the renderer's switch discriminant; the remaining fields
+ *         are tolerated-optional in spirit (the Hub may add more), but the
+ *         renderer only reads what it needs and guards each access.
+ */
+export interface SymbolCrossRepoFinding {
+  kind: 'symbol';
+  consumerRepo: string;
+  consumerSymbol: { name: string; filePath: string } | null;
+  providerSymbol: { name: string; filePath: string; symbolLabel: string } | null;
+  via: string;
+  edgeType: string;
+  detectionTier: string;
+  confidence: number;
+}
+
+/** A whole repo consumes a changed contract artifact (HTTP route, proto, topic, …). */
+export interface ContractCrossRepoFinding {
+  kind: 'contract';
+  consumerRepo: string;
+  via: string;
+  changedFile?: string; // present only on Hubs that resolve the defining file
+  edgeType: string;
+  detectionTier: string;
+  confidence: number;
+}
+
+/** The changed symbol is a step in a cross-repo execution flow. */
+export interface FlowCrossRepoFinding {
+  kind: 'flow';
+  consumerRepo: string; // '' — a flow spans repos; see flow.repoIds
+  via: string;
+  flow: { label: string; step: number; stepCount: number; repoIds: string[] };
+  edgeType: string;
+  detectionTier: string;
+  confidence: number;
+}
+
+/**
+ * @brief: Discriminated union of every cross-repo finding kind. The renderer
+ *         switches on `kind` with a default no-op, so an unknown future kind
+ *         (e.g. the reserved 'breakage') renders as nothing rather than throwing.
+ */
+export type CrossRepoFinding =
+  | SymbolCrossRepoFinding
+  | ContractCrossRepoFinding
+  | FlowCrossRepoFinding;
+
+/** Per-group metadata. `name` is wire-only — the renderer NEVER prints it (§5.2). */
+export interface CrossRepoGroup {
+  id: string;
+  name: string;
+  lastAnalyzedAt: string | null;
+  stale: boolean;
+}
+
+/**
  * @brief: Cross-repo blast-radius envelope returned by the Hub alongside the
  *         single-repo result. The Hub emits a populated envelope when the
  *         repo belongs to a ready group, or a zero-state envelope otherwise;
- *         either way the field is always present on new Hub builds. The
- *         Action's job here is to ACCEPT and PRESERVE it — not to render it.
+ *         either way the field is always present on new Hub builds.
  *
- *         `findings` and `groups` are deliberately `unknown[]`: the per-finding
- *         discriminated union (symbol / contract / flow) and the group-meta
- *         shape are the renderer PR's concern, not this trust-boundary type.
+ *         `findings`/`groups` are typed unions for the renderer to switch on;
+ *         `normalizeCrossRepo` validates only that they are arrays (shallow,
+ *         trust-boundary) and casts — the renderer tolerates unknown members.
  *
- * @params: (schemaVersion) -> Hub envelope schema tag. Typed `string` (not the
- *                             literal '1') so a future Hub schema bump does not
- *                             force an Action type change.
- * @params: (findings)      -> Opaque cross-repo finding objects; loose by design.
- * @params: (groups)        -> Opaque per-group metadata objects; loose by design.
+ * @params: (schemaVersion) -> Hub envelope schema tag. A value other than '1'
+ *                             degrades to an error envelope at normalize time
+ *                             (we cannot safely render unknown semantics).
+ * @params: (findings)      -> Cross-repo findings (symbol / contract / flow).
+ * @params: (groups)        -> Per-group metadata (id, name, freshness).
  * @params: (truncated)     -> Hub-side cap marker on the findings list.
  * @params: (error)         -> Non-null when the join could-not-run; null when it
  *                             ran cleanly (distinct from an empty findings list).
  */
 export interface CrossRepoResult {
   schemaVersion: string;
-  findings: unknown[];
-  groups: unknown[];
+  findings: CrossRepoFinding[];
+  groups: CrossRepoGroup[];
   truncated: boolean;
   error: string | null;
 }
@@ -300,9 +356,9 @@ function isObject(v: unknown): v is Record<string, unknown> {
  *         object; otherwise fills each field with a type-checked default.
  *         `findings`/`groups` are passed through verbatim when they are arrays.
  *
- *         Intentionally NOT version-aware: `schemaVersion` is preserved as-is
- *         (defaulting to '1' only when non-string). "Degrade on unknown
- *         version" logic is deferred to the renderer PR.
+ *         Version-aware: a `schemaVersion` other than '1' degrades to an error
+ *         envelope (empty findings + an `error`) rather than mis-rendering data
+ *         whose semantics may have changed — the schemaVersion exists for this.
  *
  * @params: (v: unknown) -> The `crossRepo` field off a Hub response body.
  *
@@ -310,10 +366,24 @@ function isObject(v: unknown): v is Record<string, unknown> {
  */
 function normalizeCrossRepo(v: unknown): CrossRepoResult {
   if (!isObject(v)) return EMPTY_CROSS_REPO;
+  const sv = typeof v.schemaVersion === 'string' ? v.schemaVersion : undefined;
+  if (sv !== undefined && sv !== '1') {
+    return {
+      schemaVersion: '1',
+      findings: [],
+      groups: [],
+      truncated: false,
+      error: `unsupported crossRepo schema version: ${sv}`,
+    };
+  }
+  // Shallow trust-boundary validation: confirm arrays, then cast. The renderer
+  // switches on `kind` with a default no-op, so malformed members render as
+  // nothing rather than throwing — deep per-finding validation would reject
+  // valid responses from a Hub that adds fields.
   return {
-    schemaVersion: typeof v.schemaVersion === 'string' ? v.schemaVersion : '1',
-    findings: Array.isArray(v.findings) ? v.findings : [],
-    groups: Array.isArray(v.groups) ? v.groups : [],
+    schemaVersion: '1',
+    findings: Array.isArray(v.findings) ? (v.findings as CrossRepoFinding[]) : [],
+    groups: Array.isArray(v.groups) ? (v.groups as CrossRepoGroup[]) : [],
     truncated: Boolean(v.truncated),
     error: typeof v.error === 'string' ? v.error : null,
   };

@@ -1,0 +1,255 @@
+{
+  "prNumber": 128,
+  "prTitle": "refactor: consolidate user + order API routes",
+  "prAuthor": "zander-raycraft",
+  "prBranch": "refactor/api-routes",
+  "prStatus": "open",
+  "blastLevel": "MEDIUM",
+  "changedSymbols": [
+    {
+      "id": "Function:src/api/routes/users.ts:registerUserRoutes",
+      "name": "registerUserRoutes",
+      "type": "Function",
+      "filePath": "src/api/routes/users.ts",
+      "startLine": 14,
+      "endLine": 60
+    },
+    {
+      "id": "Function:src/api/routes/orders.ts:registerOrderRoutes",
+      "name": "registerOrderRoutes",
+      "type": "Function",
+      "filePath": "src/api/routes/orders.ts",
+      "startLine": 9,
+      "endLine": 48
+    }
+  ],
+  "d1Symbols": [],
+  "d2Symbols": [],
+  "d3Symbols": [],
+  "affectedFlows": [],
+  "affectedModules": [
+    {
+      "name": "API",
+      "hits": 2,
+      "direct": true
+    }
+  ],
+  "changedFiles": [
+    {
+      "path": "src/api/routes/users.ts",
+      "status": "modified"
+    },
+    {
+      "path": "src/api/routes/orders.ts",
+      "status": "modified"
+    }
+  ],
+  "fileRiskLevel": null,
+  "riskFiles": [],
+  "graphData": {
+    "nodes": [],
+    "links": []
+  },
+  "crossRepo": {
+    "schemaVersion": "1",
+    "findings": [
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "messaging:user.created",
+        "edgeType": "CALLS",
+        "detectionTier": "tier2_async",
+        "confidence": 0.8
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "messaging:orders.created",
+        "edgeType": "CALLS",
+        "detectionTier": "tier2_async",
+        "confidence": 0.8
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "messaging:order.placed",
+        "edgeType": "CALLS",
+        "detectionTier": "tier2_async",
+        "confidence": 0.8
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "messaging:events.order",
+        "edgeType": "CALLS",
+        "detectionTier": "tier2_async",
+        "confidence": 0.8
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:GET /api/users",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:POST /api/orders",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:GET /path",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:POST /path",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:GET /users/42",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:DELETE /users/99",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:GET /api/orders",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:GET /users",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:GET /",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:POST /api/users",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:DELETE /api/users/{id}",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:GET /api/orders/{id}",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:POST /api/orders/42",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:GET /api/users/{id}",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:DELETE /api/users/123",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:GET /users/123",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:GET /api/orders/42",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:GET /api/users/1",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      },
+      {
+        "kind": "contract",
+        "consumerRepo": "Akon-Labs/gitnexus-enterprise",
+        "via": "http:GET /api/repos",
+        "edgeType": "CALLS",
+        "detectionTier": "tier3_http",
+        "confidence": 0.7
+      }
+    ],
+    "groups": [
+      {
+        "id": "ab832bde-a9e6-4ecd-8293-251b45371e95",
+        "name": "z-akon",
+        "lastAnalyzedAt": "2026-06-14T20:30:06.833Z",
+        "stale": false
+      }
+    ],
+    "truncated": false,
+    "error": null
+  },
+  "truncated": false,
+  "stale": false,
+  "computedAt": "2026-06-14T20:35:00.000Z"
+}

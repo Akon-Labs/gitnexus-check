@@ -10,3 +10,8 @@ arch/
 !dist/
 !dist/**
 .gitnexus
+
+
+/test/results/pr-flow/
+/scripts/render-live.ts
+/scripts/render-fixture.ts

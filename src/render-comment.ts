@@ -3,7 +3,7 @@
  *         normalised BlastResult (post-isBlastResult, post-normalize) and
  *         emits a single string under CHAR_BUDGET. Performs progressive
  *         truncation when over budget per v1-integration-plan.md §8. No
- *         I/O, no `core.*`, no axios — this module is deterministic and
+ *         I/O, no `core.*`, no axios - this module is deterministic and
  *         fully fixture-testable.
  */
 
@@ -13,6 +13,9 @@ import type {
   BlastLevel,
   BlastResult,
   ChangedFile,
+  CrossRepoFinding,
+  CrossRepoGroup,
+  CrossRepoResult,
   RiskFile,
   SymbolRef,
 } from './types/blast-result';
@@ -50,6 +53,24 @@ const TOP_N_RISK_FILES = 20;
 const TOP_N_FLOW_ROWS = 20;
 const TOP_N_FILE_ROWS = 20;
 
+/** Max cross-repo findings rendered before a "(N more)" trailer. */
+const TOP_N_CROSS_REPO = 15;
+/** Per-consumer-repo finding cap applied at the `capped` truncation level. */
+const CROSS_REPO_CAPPED_PER_REPO = 3;
+
+/**
+ * Display channels for cross-repo findings, in render order. Each finding is
+ * sorted into one of these so a consumer repo's dependencies read as a few
+ * labelled groups instead of a flat list of near-identical bullets.
+ */
+const CROSS_REPO_CHANNEL_ORDER = [
+  'Imported symbols',
+  'HTTP routes',
+  'Messaging topics',
+  'Contracts',
+  'Shared flows',
+] as const;
+
 /**
  * @brief: Render a BlastResult into the v1 comment markdown. Always starts
  *         with COMMENT_MARKER. Sections are emitted only when their
@@ -63,7 +84,7 @@ const TOP_N_FILE_ROWS = 20;
  * @params: (opts.prNumber: number) -> GitHub PR number for the heading.
  * @params: (opts.hubUrl: string)   -> Hub base URL, used in the footer link.
  *
- * @returns: string — markdown body ≤ CHAR_BUDGET.
+ * @returns: string - markdown body ≤ CHAR_BUDGET.
  */
 export function renderComment(
   blast: BlastResult,
@@ -83,14 +104,14 @@ export function renderComment(
     const body = variant();
     if (body.length <= CHAR_BUDGET) return body;
   }
-  // Even the headline variant blew the budget — clamp hard.
+  // Even the headline variant blew the budget - clamp hard.
   return variants[variants.length - 1]().slice(0, CHAR_BUDGET);
 }
 
 type DetailLevel = 'full' | 'no-details' | 'capped' | 'minimal' | 'headline-only';
 
 /**
- * @brief: Build the comment body at a given detail level. Internal — the
+ * @brief: Build the comment body at a given detail level. Internal - the
  *         exported renderComment iterates this with progressively lower
  *         detail until the result fits CHAR_BUDGET.
  */
@@ -159,7 +180,7 @@ function buildBody(
  * @brief: Centered header block with the review title.
  *
  * @params: (prNumber: number) -> GitHub PR number for the title.
- * @returns: string — an HTML-centered markdown block.
+ * @returns: string - an HTML-centered markdown block.
  */
 function renderHeader(prNumber: number): string {
   return [
@@ -174,12 +195,12 @@ function renderHeader(prNumber: number): string {
 }
 
 /**
- * @brief: At-a-glance metrics strip rendered just under the verdict — a
+ * @brief: At-a-glance metrics strip rendered just under the verdict - a
  *         one-row table of the headline numbers (level, dependents,
  *         modules, flows, files) so a reviewer can scan impact instantly.
  *
  * @params: (blast: BlastResult) -> Normalised Hub result.
- * @returns: string — a single-row markdown table.
+ * @returns: string - a single-row markdown table.
  */
 function renderSummaryStrip(blast: BlastResult): string {
   const deps = blast.d1Symbols.length + blast.d2Symbols.length + blast.d3Symbols.length;
@@ -192,7 +213,7 @@ function renderSummaryStrip(blast: BlastResult): string {
 
 /**
  * @brief: Render the signal sections grouped into three reviewer-intent
- *         buckets — "What changed" (the PR's own edits), "What it affects"
+ *         buckets - "What changed" (the PR's own edits), "What it affects"
  *         (downstream impact), and "What to check" (risk/follow-ups). Each
  *         bucket header is emitted only when it has at least one section.
  *         Long lists (Symbol Changes, Changed Files, Affected Flows, File
@@ -249,6 +270,19 @@ function appendSections(
   }
   rendered = appendBucket(parts, 'What it affects', affects) || rendered;
 
+  // ── Cross-repo impact: reach into the org's other repos ──
+  // Renders when there are findings OR an error (silence reads as "no impact",
+  // so a failed bridge join must still be visible). Dropped at minimal /
+  // headline-only; per-repo capped at `capped`. Cross-repo outranks d2/d3
+  // transitive detail but never the headline.
+  if (detail !== 'minimal') {
+    const cr = blast.crossRepo;
+    if (cr && (cr.findings.length > 0 || cr.error !== null)) {
+      const section = renderCrossRepo(cr, detail);
+      if (section) rendered = appendBucket(parts, 'Cross-Repo Impact', [section]) || rendered;
+    }
+  }
+
   // ── What to check: risk / follow-ups ──
   const check: string[] = [];
   if (detail === 'full' && blast.riskFiles.length > 0) {
@@ -278,7 +312,180 @@ function appendBucket(parts: string[], title: string, sections: string[]): boole
 }
 
 /**
- * @brief: The Verdict — a deterministic single-line ruling for the
+ * @brief: Render the Cross-Repo Impact bucket body. Opens with one plain-English
+ *         sentence explaining what cross-repo impact means, then a subsection per
+ *         consumer repo whose findings are grouped into labelled channels (HTTP
+ *         routes, messaging topics, imported symbols, …) so the section reads as
+ *         a scannable map rather than a flat dump. Closes with freshness /
+ *         degraded notes. Hub order is preserved (the Hub confidence-sorts; the
+ *         Action never re-sorts). All interpolated Hub strings pass through
+ *         escapeCell. Returns '' if nothing renders.
+ *
+ * @params: (cr: CrossRepoResult) -> The normalised cross-repo envelope.
+ * @params: (detail: DetailLevel) -> Drives the per-repo cap at `capped`.
+ */
+function renderCrossRepo(cr: CrossRepoResult, detail: DetailLevel): string {
+  // Group by consumer repo, preserving Hub order, capped at TOP_N_CROSS_REPO.
+  const order: string[] = [];
+  const byRepo = new Map<string, CrossRepoFinding[]>();
+  let shown = 0;
+  for (const f of cr.findings) {
+    if (shown >= TOP_N_CROSS_REPO) break;
+    // Flow findings carry consumerRepo '' (they span repos); bucket them under
+    // a named header so they don't collapse into a blank-named group.
+    const key = f.consumerRepo && f.consumerRepo.length > 0 ? f.consumerRepo : 'Shared cross-repo flows';
+    const existing = byRepo.get(key);
+    if (existing) {
+      existing.push(f);
+    } else {
+      byRepo.set(key, [f]);
+      order.push(key);
+    }
+    shown++;
+  }
+
+  const perRepoCap = detail === 'capped' ? CROSS_REPO_CAPPED_PER_REPO : Number.POSITIVE_INFINITY;
+  const lines: string[] = [];
+
+  // One plain sentence so a reviewer knows what this section means, then a
+  // collapsed block per consumer repo so the comment stays short by default.
+  lines.push(
+    '> Repos in your group that depend on code this PR changes. Expand each to see what it relies on, and review before merging.',
+  );
+  lines.push('');
+
+  for (const repo of order) {
+    const findings = byRepo.get(repo) ?? [];
+    const visible = findings.slice(0, perRepoCap);
+    const noun = findings.length === 1 ? 'interface' : 'interfaces';
+    const channelLines = renderConsumerChannels(visible);
+    const hidden = findings.length - visible.length;
+    if (hidden > 0) channelLines.push(`_…and ${hidden} more in this repo._`);
+    const inner = channelLines.join('\n').trimEnd();
+    lines.push(detailsBlock(`${escapeCell(repo)} · ${findings.length} ${noun}`, inner));
+    lines.push('');
+  }
+
+  const remaining = cr.findings.length - shown;
+  if (remaining > 0) {
+    lines.push(`_${remaining} further cross-repo finding${remaining === 1 ? '' : 's'} not shown._`);
+    lines.push('');
+  }
+
+  const staleDate = oldestStaleDate(cr.groups);
+  if (staleDate) {
+    lines.push(
+      `_Based on a cross-repo analysis from ${staleDate}. Re-analyze the group for up-to-date results._`,
+    );
+  }
+  // Privacy: never echo the raw Hub error (it can carry a group name, §5.2).
+  if (cr.error !== null) {
+    lines.push('_Cross-repo analysis was incomplete, so some dependents may be missing._');
+  }
+
+  return lines.join('\n').trimEnd();
+}
+
+/**
+ * @brief: Group a consumer repo's findings into labelled channels (HTTP routes,
+ *         messaging topics, imported symbols, …) and render each as a compact
+ *         block: a single comma-separated line for interface-style channels, a
+ *         short bullet list for the symbol/flow channels that carry a location.
+ *         This turns a flat dump of near-identical bullets into a scannable map
+ *         of "what kind of thing, and how many".
+ */
+function renderConsumerChannels(findings: CrossRepoFinding[]): string[] {
+  const inlineItems = new Map<string, string[]>();
+  const bulletItems = new Map<string, string[]>();
+  for (const f of findings) {
+    const c = categorizeFinding(f);
+    if (!c) continue;
+    const bucket = c.style === 'inline' ? inlineItems : bulletItems;
+    const list = bucket.get(c.channel);
+    if (list) list.push(c.display);
+    else bucket.set(c.channel, [c.display]);
+  }
+
+  const out: string[] = [];
+  for (const channel of CROSS_REPO_CHANNEL_ORDER) {
+    const inline = inlineItems.get(channel);
+    if (inline && inline.length > 0) {
+      out.push(`**${channel}** (${inline.length}): ${inline.join(', ')}`);
+      out.push('');
+      continue;
+    }
+    const bullets = bulletItems.get(channel);
+    if (bullets && bullets.length > 0) {
+      out.push(`**${channel}** (${bullets.length}):`);
+      for (const b of bullets) out.push(`- ${b}`);
+      out.push('');
+    }
+  }
+  return out;
+}
+
+/**
+ * @brief: Sort one finding into a display channel. Discriminated-union switch on
+ *         `kind` with a default of `null` (skip), so an unknown future kind (the
+ *         reserved 'breakage') is ignored rather than mis-rendered. Contract
+ *         `via` values carry a `http:` / `messaging:` prefix that names the
+ *         channel, so we strip it from the display once the channel is set.
+ *         Every interpolated value is escaped for a markdown table/code cell.
+ */
+function categorizeFinding(
+  f: CrossRepoFinding,
+): { channel: string; display: string; style: 'inline' | 'bullet' } | null {
+  switch (f.kind) {
+    case 'symbol': {
+      const display = f.consumerSymbol
+        ? `\`${escapeCell(f.consumerSymbol.name)}\` (used in \`${escapeCell(f.consumerSymbol.filePath)}\`)`
+        : `\`${escapeCell(f.via)}\``;
+      return { channel: 'Imported symbols', display, style: 'bullet' };
+    }
+    case 'contract': {
+      if (f.via.startsWith('http:')) {
+        return { channel: 'HTTP routes', display: `\`${escapeCell(f.via.slice(5))}\``, style: 'inline' };
+      }
+      if (f.via.startsWith('messaging:')) {
+        return { channel: 'Messaging topics', display: `\`${escapeCell(f.via.slice(10))}\``, style: 'inline' };
+      }
+      return { channel: 'Contracts', display: `\`${escapeCell(f.via)}\``, style: 'inline' };
+    }
+    case 'flow':
+      return {
+        channel: 'Shared flows',
+        display: `\`${escapeCell(f.flow.label)}\` (step ${f.flow.step} of ${f.flow.stepCount})`,
+        style: 'bullet',
+      };
+    default:
+      return null;
+  }
+}
+
+/** Distinct, non-empty consumer repos in Hub-emit order (for the verdict clause). */
+function distinctConsumerRepos(findings: CrossRepoFinding[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const f of findings) {
+    if (f.consumerRepo && !seen.has(f.consumerRepo)) {
+      seen.add(f.consumerRepo);
+      out.push(f.consumerRepo);
+    }
+  }
+  return out;
+}
+
+/** Oldest `lastAnalyzedAt` among stale groups as YYYY-MM-DD, or null if none stale. */
+function oldestStaleDate(groups: CrossRepoGroup[]): string | null {
+  const dates = groups
+    .filter((g) => g.stale && typeof g.lastAnalyzedAt === 'string')
+    .map((g) => g.lastAnalyzedAt as string)
+    .sort();
+  return dates.length > 0 ? dates[0].slice(0, 10) : null;
+}
+
+/**
+ * @brief: The Verdict - a deterministic single-line ruling for the
  *         blockquote at the top, derived solely from already-validated
  *         numeric/enum fields (never untrusted PR title/branch strings).
  *         Combines the blast-level ruling, total dependent count, module
@@ -289,7 +496,7 @@ function appendBucket(parts: string[], title: string, sections: string[]): boole
  *
  * @params: (blast: BlastResult) -> Normalised Hub result.
  *
- * @returns: string — the one-line verdict, or '' when empty.
+ * @returns: string - the one-line verdict, or '' when empty.
  */
 function buildHeadline(blast: BlastResult): string {
   const bits: string[] = [];
@@ -304,7 +511,25 @@ function buildHeadline(blast: BlastResult): string {
   if (flows > 0) bits.push(`${flows} flow${flows === 1 ? '' : 's'} affected`);
   const rationale = levelRationale(blast.blastLevel);
   if (rationale) bits.push(rationale);
+
+  // Cross-repo verdict clause: "affects N other repos (a, b, c +K more)".
+  const cr = blast.crossRepo;
+  if (cr && cr.findings.length > 0) {
+    const repos = distinctConsumerRepos(cr.findings);
+    if (repos.length > 0) {
+      const head = repos.slice(0, 3).map(escapeCell).join(', ');
+      const extra = repos.length > 3 ? ` +${repos.length - 3} more` : '';
+      bits.push(`affects ${repos.length} other repo${repos.length === 1 ? '' : 's'} (${head}${extra})`);
+    }
+  }
+
   if (blast.stale) bits.push('_(stale, re-run for fresh analysis)_');
+  // Distinct cross-repo caveats (error and stale are different states).
+  if (cr && cr.error !== null) {
+    bits.push('_(cross-repo analysis unavailable)_');
+  } else if (cr && cr.groups.some((g) => g.stale)) {
+    bits.push('_(cross-repo data may be stale)_');
+  }
   return bits.join(' · ');
 }
 
@@ -411,7 +636,7 @@ function renderArchitectureImpact(modules: AffectedModule[], detail: DetailLevel
  *         back to '(unnamed flow)'; every Hub string is run through
  *         escapeCell (§6.1). Rows are capped at TOP_N_FLOW_ROWS at the
  *         capped detail level with a `_(N more)_` trailer. No section
- *         header — the caller wraps it in a collapsible block.
+ *         header - the caller wraps it in a collapsible block.
  */
 function renderAffectedFlows(flows: AffectedFlow[], detail: DetailLevel): string {
   const cap = detail === 'capped' ? TOP_N_FLOW_ROWS : flows.length;
@@ -504,7 +729,7 @@ function appendDetails(rows: string[], summary: string, symbols: SymbolRef[]): v
 
 /**
  * @brief: Render the Symbol Changes table (`| Kind | Symbol | Location |`).
- *         No section header — the caller wraps it in a collapsible block
+ *         No section header - the caller wraps it in a collapsible block
  *         whose summary carries the count. Capped per detail level.
  */
 function renderSymbolChanges(symbols: SymbolRef[], detail: DetailLevel): string {
@@ -552,7 +777,7 @@ function renderApiSurfaceDelta(symbols: SymbolRef[]): string {
 }
 
 /**
- * @brief: Render the File Risk table. No section header — the caller wraps
+ * @brief: Render the File Risk table. No section header - the caller wraps
  *         it in a collapsible block. Risk and status render as
  *         emoji-prefixed badges; all Hub strings pass through escapeCell.
  */
@@ -584,7 +809,7 @@ function renderRiskFiles(riskFiles: RiskFile[]): string {
  *         is nothing to recommend.
  *
  * @params: (blast: BlastResult) -> Normalised Hub result.
- * @returns: string — the markdown section, or '' when not applicable.
+ * @returns: string - the markdown section, or '' when not applicable.
  */
 function renderRecommendations(blast: BlastResult): string {
   if (blast.blastLevel === 'LOW') return '';
@@ -670,7 +895,7 @@ function formatLocation(symbol: SymbolRef): string {
  * @brief: Defensively escape characters that would break a markdown table
  *         cell or inline code span. The Hub-supplied strings (file paths,
  *         symbol names, module names) are untrusted-input-ish in the
- *         security-model sense — they come from the user's own repo but
+ *         security-model sense - they come from the user's own repo but
  *         flow through our renderer; we treat them conservatively.
  *
  *         Backticks are replaced (not backslash-escaped) because GFM code

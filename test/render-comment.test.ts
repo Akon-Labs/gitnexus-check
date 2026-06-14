@@ -449,38 +449,211 @@ describe('renderComment — recommendations', () => {
 });
 
 describe('renderComment — crossRepo backward-compat', () => {
-  it('produces byte-identical output whether or not crossRepo is present', () => {
-    // The renderer must ignore the new crossRepo envelope entirely (rendering
-    // is a later PR). Injecting a populated crossRepo must not perturb output.
+  it('absent or empty crossRepo renders byte-identical to a no-crossRepo result', () => {
+    // The backward-compat tripwire: a Hub that omits crossRepo (or sends the
+    // zero-state envelope) must produce exactly the v1 comment. base has no
+    // crossRepo field; withEmpty carries the zero-state. Both normalize to the
+    // same EMPTY_CROSS_REPO and must render identically.
     const base = loadBlast('blast-result-full.json');
-    const withCross = normalizeBlastResult({
+    const withEmpty = normalizeBlastResult({
       ...base,
+      crossRepo: { schemaVersion: '1', findings: [], groups: [], truncated: false, error: null },
+    });
+    expect(renderComment(withEmpty, OPTS)).toBe(renderComment(base, OPTS));
+  });
+});
+
+describe('renderComment — crossRepo rendering', () => {
+  function withFindings(findings: unknown[], groups: unknown[] = [], error: string | null = null) {
+    const base = loadBlast('blast-result-full.json');
+    return normalizeBlastResult({
+      ...base,
+      crossRepo: { schemaVersion: '1', findings, groups, truncated: false, error },
+    });
+  }
+
+  it('renders the Cross-Repo Impact bucket from the captured fixture', () => {
+    const out = renderComment(loadBlast('blast-result-cross-repo.json'), OPTS);
+    expect(out).toContain('## Cross-Repo Impact');
+    // Each consumer repo is collapsed behind a <details> summary with its count.
+    expect(out).toContain('<summary><b>acme/widget-web · 1 interface</b></summary>');
+    // symbol findings land in the "Imported symbols" channel; raw float never shown.
+    expect(out).toContain('**Imported symbols** (1):');
+    expect(out).toContain('`fetchBlast` (used in `src/api/blast.ts`)');
+    expect(out).not.toContain('0.92');
+  });
+
+  it('opens with a plain-English explanation of what the section means', () => {
+    const out = renderComment(loadBlast('blast-result-cross-repo.json'), OPTS);
+    expect(out).toContain('depend on code this PR changes');
+  });
+
+  it('places the bucket between "What it affects" and "What to check"', () => {
+    const blast = withFindings(
+      [
+        {
+          kind: 'symbol',
+          consumerRepo: 'acme/web',
+          consumerSymbol: { name: 'f', filePath: 'src/f.ts' },
+          providerSymbol: null,
+          via: 'imports f',
+          edgeType: 'IMPORTS',
+          detectionTier: 'static',
+          confidence: 0.95,
+        },
+      ],
+      [],
+    );
+    const out = renderComment(blast, OPTS);
+    const affects = out.indexOf('## What it affects');
+    const cross = out.indexOf('## Cross-Repo Impact');
+    expect(affects).toBeGreaterThanOrEqual(0);
+    expect(cross).toBeGreaterThan(affects);
+  });
+
+  it('adds the verdict clause naming the affected repos', () => {
+    const blast = withFindings([
+      sym('acme/web', 0.95),
+      sym('acme/mobile', 0.95),
+    ]);
+    const out = renderComment(blast, OPTS);
+    expect(out).toContain('affects 2 other repos (acme/web, acme/mobile)');
+  });
+
+  it('groups HTTP routes and messaging topics into compact channels', () => {
+    const blast = withFindings([
+      contract('acme/api', 'http:GET /api/tasks'),
+      contract('acme/api', 'http:POST /api/tasks'),
+      contract('acme/api', 'messaging:task.created'),
+    ]);
+    const out = renderComment(blast, OPTS);
+    // channel labels + counts, with the http:/messaging: prefix stripped, inline.
+    expect(out).toContain('**HTTP routes** (2): `GET /api/tasks`, `POST /api/tasks`');
+    expect(out).toContain('**Messaging topics** (1): `task.created`');
+    // no per-line "verify before merge" noise anymore.
+    expect(out).not.toContain('verify before merge');
+  });
+
+  it('renders flow findings under a named header with step context', () => {
+    const blast = withFindings([
+      {
+        kind: 'flow',
+        consumerRepo: '',
+        via: 'checkout pipeline',
+        flow: { label: 'checkout pipeline', step: 2, stepCount: 4, repoIds: ['a', 'b', 'c'] },
+        edgeType: 'STEP_IN_CROSS_PROCESS',
+        detectionTier: 'process',
+        confidence: 1,
+      },
+    ]);
+    const out = renderComment(blast, OPTS);
+    expect(out).toContain('<summary><b>Shared cross-repo flows · 1 interface</b></summary>');
+    expect(out).toContain('**Shared flows** (1):');
+    expect(out).toContain('`checkout pipeline` (step 2 of 4)');
+  });
+
+  it('renders a generic degraded caveat on error WITHOUT echoing the raw error string', () => {
+    const blast = withFindings([], [], 'bridge file missing for Secret Internal Group, re-analyze');
+    const out = renderComment(blast, OPTS);
+    expect(out).toContain('## Cross-Repo Impact');
+    expect(out).toContain('_Cross-repo analysis was incomplete, so some dependents may be missing._');
+    expect(out).toContain('_(cross-repo analysis unavailable)_'); // headline caveat
+    expect(out).not.toContain('Secret Internal Group'); // privacy: no group name leak
+  });
+
+  it('escapes pipe characters in consumerRepo and via', () => {
+    const blast = withFindings([
+      {
+        kind: 'contract',
+        consumerRepo: 'acme/ev|il',
+        via: 'http:GET /a|b',
+        edgeType: 'CALLS',
+        detectionTier: 'tier3_http',
+        confidence: 0.7,
+      },
+    ]);
+    const out = renderComment(blast, OPTS);
+    expect(out).toContain('acme/ev\\|il');
+    expect(out).toContain('/a\\|b');
+  });
+
+  it('survives the capped truncation level and applies the per-repo cap (3)', () => {
+    // A huge changed-symbol list forces the renderer down to `capped` (the
+    // symbol list caps at 50 and fits the budget). The cross-repo bucket must
+    // survive capping, but each consumer repo is limited to 3 findings.
+    const huge: SymbolRef[] = Array.from({ length: 20000 }, (_, i) => ({
+      id: `s${i}`,
+      name: `symbol_${i}_${'x'.repeat(40)}`,
+      type: 'Function',
+      filePath: `src/path/to/file_${i}.ts`,
+      startLine: 1,
+      endLine: 2,
+    }));
+    const base = loadBlast('blast-result-full.json');
+    const blast = normalizeBlastResult({
+      ...base,
+      changedSymbols: huge,
       crossRepo: {
         schemaVersion: '1',
         findings: [
-          {
-            kind: 'symbol',
-            consumerRepo: 'acme/widget-web',
-            consumerSymbol: { name: 'fetchBlast', filePath: 'src/api/blast.ts' },
-            providerSymbol: {
-              name: 'generateCode',
-              filePath: 'gitnexus-hub/scripts/create-invite.ts',
-              symbolLabel: 'Function',
-            },
-            via: 'imports generateCode',
-            edgeType: 'IMPORTS',
-            detectionTier: 'static',
-            confidence: 0.9,
-          },
+          sym('acme/web', 0.95),
+          sym('acme/web', 0.95),
+          sym('acme/web', 0.95),
+          sym('acme/web', 0.95),
+          sym('acme/web', 0.95),
         ],
-        groups: [{ id: 'grp-001', name: 'Acme Platform', lastAnalyzedAt: null, stale: false }],
+        groups: [],
         truncated: false,
         error: null,
       },
     });
-    expect(renderComment(withCross, OPTS)).toBe(renderComment(base, OPTS));
+    const out = renderComment(blast, OPTS);
+    expect(out.length).toBeLessThanOrEqual(CHAR_BUDGET);
+    expect(out).toContain('## Cross-Repo Impact');
+    expect(out).toContain('<summary><b>acme/web · 5 interfaces</b></summary>'); // true count
+    expect(out).toContain('_…and 2 more in this repo._'); // only 3 rendered at capped
+    expect(out).toContain('affects 1 other repo (acme/web)'); // verdict clause present
+  });
+
+  it('degrades an unknown schemaVersion to an error envelope', () => {
+    const base = loadBlast('blast-result-full.json');
+    const blast = normalizeBlastResult({
+      ...base,
+      crossRepo: { schemaVersion: '2', findings: [sym('acme/web', 0.95)], groups: [], truncated: false, error: null },
+    });
+    // normalize drops findings and sets error → bucket shows the degraded notice.
+    expect(blast.crossRepo?.findings).toHaveLength(0);
+    expect(blast.crossRepo?.error).toContain('unsupported crossRepo schema version: 2');
+    const out = renderComment(blast, OPTS);
+    expect(out).toContain('_Cross-repo analysis was incomplete, so some dependents may be missing._');
   });
 });
+
+/** Build a minimal symbol cross-repo finding for a given consumer repo + confidence. */
+function sym(consumerRepo: string, confidence: number) {
+  return {
+    kind: 'symbol' as const,
+    consumerRepo,
+    consumerSymbol: { name: 'fetchBlast', filePath: 'src/api/blast.ts' },
+    providerSymbol: { name: 'compute', filePath: 'src/compute.ts', symbolLabel: 'Function' },
+    via: 'imports fetchBlast',
+    edgeType: 'IMPORTS',
+    detectionTier: 'static',
+    confidence,
+  };
+}
+
+/** Build a minimal contract cross-repo finding for a given consumer repo + via. */
+function contract(consumerRepo: string, via: string) {
+  return {
+    kind: 'contract' as const,
+    consumerRepo,
+    via,
+    edgeType: 'CALLS',
+    detectionTier: via.startsWith('messaging:') ? 'tier2_async' : 'tier3_http',
+    confidence: via.startsWith('messaging:') ? 0.8 : 0.7,
+  };
+}
 
 describe('renderComment — escaping', () => {
   it('escapes pipe characters in module / symbol names', () => {
