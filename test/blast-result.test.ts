@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import {
   isBlastResult,
   normalizeBlastResult,
+  EMPTY_CROSS_REPO,
   type BlastResult,
 } from '../src/types/blast-result';
 
@@ -82,6 +83,28 @@ describe('isBlastResult', () => {
     ).toBe(true);
   });
 
+  it('tolerates stale: null from older Hub rows without the column backfilled', () => {
+    expect(
+      isBlastResult({
+        blastLevel: 'LOW',
+        truncated: false,
+        computedAt: 'x',
+        stale: null,
+      }),
+    ).toBe(true);
+  });
+
+  it('rejects when stale is a non-boolean non-null value', () => {
+    expect(
+      isBlastResult({
+        blastLevel: 'LOW',
+        truncated: false,
+        computedAt: 'x',
+        stale: 'yes',
+      }),
+    ).toBe(false);
+  });
+
   it('rejects when graphData is a non-object', () => {
     expect(
       isBlastResult({
@@ -89,6 +112,33 @@ describe('isBlastResult', () => {
         truncated: false,
         computedAt: 'x',
         graphData: 'oops',
+      }),
+    ).toBe(false);
+  });
+
+  it('accepts a fixture with a populated crossRepo envelope', () => {
+    const cross = loadFixture('blast-result-cross-repo.json');
+    expect(isBlastResult(cross)).toBe(true);
+  });
+
+  it('rejects when crossRepo is present as a string', () => {
+    expect(
+      isBlastResult({
+        blastLevel: 'LOW',
+        truncated: false,
+        computedAt: 'x',
+        crossRepo: 'oops',
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects when crossRepo.findings is a non-array', () => {
+    expect(
+      isBlastResult({
+        blastLevel: 'LOW',
+        truncated: false,
+        computedAt: 'x',
+        crossRepo: { schemaVersion: '1', findings: 'x', groups: [], truncated: false, error: null },
       }),
     ).toBe(false);
   });
@@ -113,6 +163,16 @@ describe('normalizeBlastResult', () => {
     expect(out.graphData).toEqual({ nodes: [], links: [] });
     expect(out.stale).toBe(false);
     expect(out.prTitle).toBeNull();
+  });
+
+  it('treats stale: null as false', () => {
+    const v = {
+      blastLevel: 'LOW',
+      truncated: false,
+      computedAt: 'x',
+      stale: null,
+    } as unknown as BlastResult;
+    expect(normalizeBlastResult(v).stale).toBe(false);
   });
 
   it('clamps unknown blastLevel to LOW', () => {
@@ -141,5 +201,56 @@ describe('normalizeBlastResult', () => {
       computedAt: 'x',
     } as unknown as BlastResult;
     expect(normalizeBlastResult(v).fileRiskLevel).toBeNull();
+  });
+
+  it('round-trips a populated crossRepo envelope, preserving findings and groups', () => {
+    const cross = loadFixture('blast-result-cross-repo.json');
+    expect(isBlastResult(cross)).toBe(true);
+    const out = normalizeBlastResult(cross as BlastResult);
+    expect(out.crossRepo).toBeDefined();
+    expect(out.crossRepo?.schemaVersion).toBe('1');
+    expect(out.crossRepo?.findings).toHaveLength(1);
+    expect(out.crossRepo?.groups).toHaveLength(1);
+    const [finding] = out.crossRepo?.findings as Array<{ consumerRepo: string }>;
+    expect(finding.consumerRepo).toBe('acme/widget-web');
+    const [group] = out.crossRepo?.groups as Array<{ name: string }>;
+    expect(group.name).toBe('Acme Platform');
+  });
+
+  it('fills a missing crossRepo with the EMPTY_CROSS_REPO zero-state', () => {
+    const v = {
+      blastLevel: 'LOW',
+      truncated: false,
+      computedAt: 'x',
+    } as unknown as BlastResult;
+    expect(normalizeBlastResult(v).crossRepo).toEqual(EMPTY_CROSS_REPO);
+  });
+});
+
+describe('AffectedFlow shape through normalize', () => {
+  it('preserves the tightened optional flow fields verbatim', () => {
+    const v = {
+      blastLevel: 'CRITICAL',
+      truncated: false,
+      computedAt: 'x',
+      affectedFlows: [
+        {
+          processId: 'proc-1',
+          processName: 'Indexing Queue Lifecycle',
+          hitSymbols: ['enqueueJob', 'drainQueue'],
+          hitCount: 7,
+        },
+        { name: 'legacy-flow' },
+      ],
+    } as unknown as BlastResult;
+    const out = normalizeBlastResult(v);
+    expect(out.affectedFlows).toHaveLength(2);
+    const [first, second] = out.affectedFlows;
+    expect(first.processId).toBe('proc-1');
+    expect(first.processName).toBe('Indexing Queue Lifecycle');
+    expect(first.hitSymbols).toEqual(['enqueueJob', 'drainQueue']);
+    expect(first.hitCount).toBe(7);
+    expect(second.name).toBe('legacy-flow');
+    expect(second.processName).toBeUndefined();
   });
 });

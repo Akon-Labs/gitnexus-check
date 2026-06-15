@@ -34303,6 +34303,15 @@ exports.classifyError = classifyError;
  * @returns: string — the user-visible failure reason.
  */
 function classifyError(err, context) {
+    // Config errors are local input-validation throws (e.g. a bad
+    // `fail-on-blast-level` value) carrying an intentional, stable message.
+    // Pass that message through unchanged — only token-scrubbed — rather than
+    // run it through HTTP-status classification that never applies here.
+    if (context === 'config') {
+        if (err instanceof Error)
+            return scrubMessage(err.message || 'invalid configuration');
+        return 'invalid configuration';
+    }
     const axiosLike = asAxiosLike(err);
     if (axiosLike) {
         const status = axiosLike.response?.status;
@@ -34464,6 +34473,74 @@ function isHtmlBody(data) {
  */
 function scrubMessage(msg) {
     return msg.replace(/gnx_[A-Za-z0-9_-]+/g, 'gnx_[redacted]');
+}
+
+
+/***/ }),
+
+/***/ 1956:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * @brief: Pure opt-in gate logic for the action. Translates the
+ *         `fail-on-blast-level` input into a typed threshold and decides
+ *         whether a given blast level should fail the workflow. Contains no
+ *         I/O and no `core.*` calls (§4.3/§5) — main.ts owns the side
+ *         effects; this module is fully unit-testable.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.parseThreshold = parseThreshold;
+exports.evaluateGate = evaluateGate;
+/**
+ * @brief: Total order over blast levels so a threshold comparison is a
+ *         simple numeric `>=`. LOW is least severe, CRITICAL most severe.
+ */
+const LEVEL_ORDER = {
+    LOW: 0,
+    MEDIUM: 1,
+    HIGH: 2,
+    CRITICAL: 3,
+};
+/**
+ * @brief: Parse the raw `fail-on-blast-level` input into a threshold. An
+ *         empty/whitespace value means the gate is advisory and is mapped
+ *         to `null`. A valid uppercase level maps to itself. Any other
+ *         value is rejected so a typo fails the run fast rather than
+ *         silently disabling the gate. Matching is strict-uppercase by
+ *         design: lowercase is treated as a typo, not a convenience.
+ *
+ * @params: (raw: string) -> The unvalidated action input value.
+ *
+ * @returns: BlastLevel | null — the threshold, or null when advisory.
+ * @throws: Error('fail-on-blast-level: invalid value "X" — expected LOW, MEDIUM, HIGH, or CRITICAL')
+ *          when raw is non-empty but not one of the four uppercase levels.
+ */
+function parseThreshold(raw) {
+    const trimmed = raw.trim();
+    if (trimmed === '')
+        return null;
+    if (trimmed === 'LOW' || trimmed === 'MEDIUM' || trimmed === 'HIGH' || trimmed === 'CRITICAL') {
+        return trimmed;
+    }
+    throw new Error(`fail-on-blast-level: invalid value "${trimmed}" — expected LOW, MEDIUM, HIGH, or CRITICAL`);
+}
+/**
+ * @brief: Decide the gate outcome for a blast level against a threshold.
+ *         A null threshold is advisory and always yields `neutral`. With a
+ *         threshold set, the gate fails when the blast level MEETS OR
+ *         EXCEEDS the threshold (`>=` in LEVEL_ORDER), otherwise passes.
+ *
+ * @params: (opts.blastLevel: BlastLevel)        -> Hub-reported overall blast level.
+ * @params: (opts.threshold: BlastLevel | null)  -> Parsed threshold; null = advisory.
+ *
+ * @returns: GateDecision — 'neutral' when advisory, else 'fail' on meet-or-exceed, else 'pass'.
+ */
+function evaluateGate(opts) {
+    if (opts.threshold === null)
+        return 'neutral';
+    return LEVEL_ORDER[opts.blastLevel] >= LEVEL_ORDER[opts.threshold] ? 'fail' : 'pass';
 }
 
 
@@ -34720,20 +34797,25 @@ const classify_error_1 = __nccwpck_require__(6042);
 const hub_client_1 = __nccwpck_require__(4162);
 const render_comment_1 = __nccwpck_require__(7323);
 const post_comment_1 = __nccwpck_require__(1229);
+const gate_1 = __nccwpck_require__(1956);
 /**
  * @brief: Top-level orchestration. Sequence:
  *           1. Read inputs + validate event shape (non-PR → warn + exit 0).
- *           2. resolveRepoId  → Hub UUID for owner/repo.
- *           3. refreshBlast   → POST /refresh (synchronous on the live Hub).
- *           4. getBlast       → GET /prs/:n; validated by isBlastResult.
- *           5. renderComment  → markdown ≤ CHAR_BUDGET.
- *           6. postOrUpdate   → Octokit upsert by marker.
- *           7. setOutput      → comment-id, blast-level.
+ *           2. parseThreshold → validate fail-on-blast-level (bad → fail fast).
+ *           3. resolveRepoId  → Hub UUID for owner/repo.
+ *           4. refreshBlast   → POST /refresh (synchronous on the live Hub).
+ *           5. getBlast       → GET /prs/:n; validated by isBlastResult.
+ *           6. renderComment  → markdown ≤ CHAR_BUDGET.
+ *           7. postOrUpdate   → Octokit upsert by marker.
+ *           8. setOutput      → comment-id, blast-level, gate-decision.
+ *           9. evaluateGate   → setFailed iff blast level meets/exceeds threshold.
  *
  *         Every Hub call wraps in try/catch → classifyError('hub'); every
- *         GitHub call wraps similarly with 'github' context. On any thrown
- *         classified message we call core.error + core.setFailed and
- *         return — no further work after the first failure.
+ *         GitHub call wraps similarly with 'github' context. The gate is the
+ *         only setFailed driven by a successful run and fires AFTER the
+ *         comment is posted. On any thrown classified message we call
+ *         core.error + core.setFailed and return — no further work after the
+ *         first failure.
  *
  * @returns: void — exits via core.setFailed on error or returns cleanly.
  */
@@ -34756,6 +34838,15 @@ async function main() {
     const repo = ctx.repo.repo;
     const fullName = `${owner}/${repo}`;
     core.info(`GitNexus Review — PR #${prNumber} (${fullName})`);
+    // ── 2. Validate the gate threshold up-front so a typo fails fast,
+    //        before any Hub round-trip. Empty input → advisory (null).
+    let threshold;
+    try {
+        threshold = (0, gate_1.parseThreshold)(core.getInput('fail-on-blast-level'));
+    }
+    catch (err) {
+        return fail(err, 'config', 'parseThreshold');
+    }
     let repoId;
     try {
         repoId = await (0, hub_client_1.resolveRepoId)({ hubUrl, token, fullName });
@@ -34795,6 +34886,14 @@ async function main() {
     core.setOutput('comment-id', String(posted.commentId));
     core.setOutput('blast-level', blast.blastLevel);
     core.info(`Comment ${posted.action} (id=${posted.commentId}); blast=${blast.blastLevel}.`);
+    // ── 9. Gate — the only success-path setFailed, evaluated after the
+    //        comment is posted so reviewers always have the report.
+    const decision = (0, gate_1.evaluateGate)({ blastLevel: blast.blastLevel, threshold });
+    core.setOutput('gate-decision', decision);
+    if (decision === 'fail') {
+        core.setFailed(`GitNexus gate: blast level ${blast.blastLevel} meets or exceeds threshold ${threshold}. See PR comment.`);
+        return;
+    }
 }
 /**
  * @brief: Translate any thrown value into a user-visible failure via
@@ -34802,9 +34901,9 @@ async function main() {
  *         body stays readable and so there's a single audit trail for
  *         token-safety: this function never receives the token value.
  *
- * @params: (err: unknown)                  -> Thrown value from a library call.
- * @params: (context: 'hub' | 'github')     -> Which side raised the error.
- * @params: (stage: string)                 -> Short stage label for the prefix.
+ * @params: (err: unknown)                        -> Thrown value from a library call.
+ * @params: (context: 'hub' | 'github' | 'config') -> Which side raised the error.
+ * @params: (stage: string)                        -> Short stage label for the prefix.
  */
 function fail(err, context, stage) {
     const msg = (0, classify_error_1.classifyError)(err, context);
@@ -34989,10 +35088,19 @@ exports.COMMENT_MARKER = '<!-- gitnexus-review-v1 -->';
  *         drift introduced by `Buffer.byteLength` vs `.length`.
  */
 exports.CHAR_BUDGET = 60_000;
+/**
+ * @brief: Embeddable (raw) URL for the Akon Labs logo in the comment header.
+ *         The comment lands in the *consumer's* repo, so a relative path
+ *         would not resolve. Must be a raw URL (not a /blob/ page URL) so it
+ *         renders inside an <img>; pinned to the public `release` branch.
+ */
+const LOGO_URL = 'https://raw.githubusercontent.com/Akon-Labs/gitnexus-check/release/.github/assets/akonlabs-logo.png';
 const TOP_N_BLAST_LIST = 20;
 const TOP_N_MODULE_ROWS = 20;
 const TOP_N_SYMBOL_ROWS = 50;
 const TOP_N_RISK_FILES = 20;
+const TOP_N_FLOW_ROWS = 20;
+const TOP_N_FILE_ROWS = 20;
 /**
  * @brief: Render a BlastResult into the v1 comment markdown. Always starts
  *         with COMMENT_MARKER. Sections are emitted only when their
@@ -35035,72 +35143,151 @@ function buildBody(blast, opts, cfg) {
     const parts = [];
     parts.push(exports.COMMENT_MARKER);
     parts.push('');
-    parts.push(`## GitNexus Review: PR #${opts.prNumber}`);
+    parts.push(renderHeader(opts.prNumber));
     parts.push('');
     const headline = buildHeadline(blast);
     if (headline) {
-        parts.push(`> ${headline}`);
+        parts.push(`> ${levelEmoji(blast.blastLevel)} ${headline}`);
         parts.push('');
     }
     if (cfg.detailLevel === 'headline-only') {
-        appendFooter(parts, blast, opts.hubUrl, /* truncated */ true);
         return parts.join('\n');
     }
     if (isEmptyBlast(blast)) {
         parts.push('No symbol changes, blast radius, architecture impact, or API surface changes detected.');
         parts.push('');
-        appendFooter(parts, blast, opts.hubUrl, false);
+        // Docs-only / config-only PRs carry changedFiles but no blast signal.
+        // Still surface the file list so the comment isn't content-free.
+        if (blast.changedFiles.length > 0) {
+            parts.push(detailsBlock(`Changed Files (${blast.changedFiles.length})`, renderChangedFiles(blast.changedFiles, cfg.detailLevel)));
+            parts.push('');
+        }
         return parts.join('\n');
     }
+    parts.push(renderSummaryStrip(blast));
+    parts.push('');
+    parts.push('---');
+    parts.push('');
     const renderedAny = appendSections(parts, blast, cfg.detailLevel);
     if (!renderedAny) {
         parts.push('No symbol changes, blast radius, architecture impact, or API surface changes detected.');
         parts.push('');
     }
-    appendFooter(parts, blast, opts.hubUrl, blast.truncated || cfg.detailLevel !== 'full');
+    const recommendations = renderRecommendations(blast);
+    if (recommendations) {
+        parts.push(recommendations);
+        parts.push('');
+    }
     return parts.join('\n');
 }
 /**
- * @brief: Render the four signal sections in canonical order. Returns
- *         true if at least one section was emitted, so the caller can
- *         decide whether to fall back to the "no impact" sentence.
+ * @brief: Centered header block with the review title.
+ *
+ * @params: (prNumber: number) -> GitHub PR number for the title.
+ * @returns: string — an HTML-centered markdown block.
+ */
+function renderHeader(prNumber) {
+    return [
+        '<div align="center">',
+        '',
+        `<img src="${LOGO_URL}" alt="Akon Labs" width="88" />`,
+        '',
+        `### GitNexus Review · PR #${prNumber}`,
+        '',
+        '</div>',
+    ].join('\n');
+}
+/**
+ * @brief: At-a-glance metrics strip rendered just under the verdict — a
+ *         one-row table of the headline numbers (level, dependents,
+ *         modules, flows, files) so a reviewer can scan impact instantly.
+ *
+ * @params: (blast: BlastResult) -> Normalised Hub result.
+ * @returns: string — a single-row markdown table.
+ */
+function renderSummaryStrip(blast) {
+    const deps = blast.d1Symbols.length + blast.d2Symbols.length + blast.d3Symbols.length;
+    return [
+        '| Blast Level | Dependents | Modules | Flows | Files |',
+        '|:--:|:--:|:--:|:--:|:--:|',
+        `| ${levelEmoji(blast.blastLevel)} \`${blast.blastLevel}\` | ${deps} | ${blast.affectedModules.length} | ${blast.affectedFlows.length} | ${blast.changedFiles.length} |`,
+    ].join('\n');
+}
+/**
+ * @brief: Render the signal sections grouped into three reviewer-intent
+ *         buckets — "What changed" (the PR's own edits), "What it affects"
+ *         (downstream impact), and "What to check" (risk/follow-ups). Each
+ *         bucket header is emitted only when it has at least one section.
+ *         Long lists (Symbol Changes, Changed Files, Affected Flows, File
+ *         Risk) are wrapped in collapsible <details> so the comment reads
+ *         as a review rather than a flat dump. Returns true if any bucket
+ *         rendered, so the caller can fall back to the "no impact" sentence.
  */
 function appendSections(parts, blast, detail) {
     let rendered = false;
+    // ── What changed: the PR's own edits ──
+    const changed = [];
+    if (detail !== 'minimal' && blast.changedSymbols.length > 0) {
+        changed.push(detailsBlock(`Symbol Changes (${blast.changedSymbols.length})`, renderSymbolChanges(blast.changedSymbols, detail)));
+    }
+    if (detail !== 'minimal' && blast.changedFiles.length > 0) {
+        changed.push(detailsBlock(`Changed Files (${blast.changedFiles.length})`, renderChangedFiles(blast.changedFiles, detail)));
+    }
+    rendered = appendBucket(parts, 'What changed', changed) || rendered;
+    // ── What it affects: downstream impact ──
+    const affects = [];
     if (blast.affectedModules.length > 0) {
-        parts.push(renderArchitectureImpact(blast.affectedModules, detail));
-        parts.push('');
-        rendered = true;
+        affects.push(renderArchitectureImpact(blast.affectedModules, detail));
+    }
+    if (detail !== 'minimal' && blast.affectedFlows.length > 0) {
+        affects.push(detailsBlock(`Affected Flows (${blast.affectedFlows.length})`, renderAffectedFlows(blast.affectedFlows, detail)));
     }
     if (detail !== 'minimal' && hasBlastRadius(blast)) {
-        parts.push(renderBlastRadius(blast, detail));
-        parts.push('');
-        rendered = true;
-    }
-    if (detail !== 'minimal' && blast.changedSymbols.length > 0) {
-        parts.push(renderSymbolChanges(blast.changedSymbols, detail));
-        parts.push('');
-        rendered = true;
+        affects.push(renderBlastRadius(blast, detail));
     }
     if (detail !== 'minimal' && detail !== 'capped') {
         const surface = projectApiSurface(blast.changedSymbols);
-        if (surface.length > 0) {
-            parts.push(renderApiSurfaceDelta(surface));
-            parts.push('');
-            rendered = true;
-        }
+        if (surface.length > 0)
+            affects.push(renderApiSurfaceDelta(surface));
     }
+    rendered = appendBucket(parts, 'What it affects', affects) || rendered;
+    // ── What to check: risk / follow-ups ──
+    const check = [];
     if (detail === 'full' && blast.riskFiles.length > 0) {
-        parts.push(renderRiskFiles(blast.riskFiles));
-        parts.push('');
-        rendered = true;
+        check.push(detailsBlock(`File Risk (${blast.riskFiles.length})`, renderRiskFiles(blast.riskFiles)));
     }
+    rendered = appendBucket(parts, 'What to check', check) || rendered;
     return rendered;
 }
 /**
- * @brief: Single-line summary for the blockquote at the top. Empty string
- *         when there's nothing to summarise (the renderer suppresses the
- *         blockquote entirely in that case).
+ * @brief: Emit a `## <title>` bucket and its sections, but only when the
+ *         bucket has at least one section. Returns whether anything was
+ *         emitted so the caller can track overall rendered state.
+ */
+function appendBucket(parts, title, sections) {
+    if (sections.length === 0)
+        return false;
+    parts.push(`## ${title}`);
+    parts.push('');
+    for (const section of sections) {
+        parts.push(section);
+        parts.push('');
+    }
+    return true;
+}
+/**
+ * @brief: The Verdict — a deterministic single-line ruling for the
+ *         blockquote at the top, derived solely from already-validated
+ *         numeric/enum fields (never untrusted PR title/branch strings).
+ *         Combines the blast-level ruling, total dependent count, module
+ *         count, a flow addendum when flows are present, a level-based
+ *         rationale clause for MEDIUM/HIGH/CRITICAL (LOW emits none), and
+ *         the stale marker. Returns '' when there is nothing to summarise
+ *         so the renderer can suppress the blockquote.
+ *
+ * @params: (blast: BlastResult) -> Normalised Hub result.
+ *
+ * @returns: string — the one-line verdict, or '' when empty.
  */
 function buildHeadline(blast) {
     const bits = [];
@@ -35112,9 +35299,66 @@ function buildHeadline(blast) {
         const m = blast.affectedModules.length;
         bits.push(`${m} module${m === 1 ? '' : 's'} touched`);
     }
+    const flows = blast.affectedFlows.length;
+    if (flows > 0)
+        bits.push(`${flows} flow${flows === 1 ? '' : 's'} affected`);
+    const rationale = levelRationale(blast.blastLevel);
+    if (rationale)
+        bits.push(rationale);
     if (blast.stale)
-        bits.push('_(stale — re-run for fresh analysis)_');
+        bits.push('_(stale, re-run for fresh analysis)_');
     return bits.join(' · ');
+}
+/**
+ * @brief: Short parenthetical rationale for the verdict, keyed off the
+ *         blast level. LOW returns '' (no clause); MEDIUM/HIGH/CRITICAL
+ *         return a fixed `_(...)_` reason.
+ */
+function levelRationale(level) {
+    switch (level) {
+        case 'CRITICAL':
+            return '_(critical surface, review carefully before merge)_';
+        case 'HIGH':
+            return '_(high reach, verify dependents)_';
+        case 'MEDIUM':
+            return '_(moderate reach, spot-check dependents)_';
+        default:
+            return '';
+    }
+}
+/** Traffic-light emoji for a blast/risk level. */
+function levelEmoji(level) {
+    switch (level) {
+        case 'CRITICAL':
+            return '🔴';
+        case 'HIGH':
+            return '🟠';
+        case 'MEDIUM':
+            return '🟡';
+        default:
+            return '🟢';
+    }
+}
+/** Emoji-prefixed, escaped change-status cell (added/modified/removed/renamed). */
+function statusBadge(status) {
+    const e = status === 'added'
+        ? '🟢'
+        : status === 'modified'
+            ? '🟡'
+            : status === 'removed'
+                ? '🔴'
+                : status === 'renamed'
+                    ? '🔵'
+                    : '⚪';
+    return `${e} ${escapeCell(status)}`;
+}
+/** Emoji-prefixed, escaped file-risk cell. */
+function riskBadge(risk) {
+    return `${levelEmoji(risk)} ${escapeCell(risk)}`;
+}
+/** Wrap inner markdown in a collapsible <details> with a bold summary. */
+function detailsBlock(summary, inner) {
+    return ['<details>', `<summary><b>${summary}</b></summary>`, '', inner, '', '</details>'].join('\n');
 }
 function isEmptyBlast(blast) {
     return (blast.changedSymbols.length === 0 &&
@@ -35122,6 +35366,7 @@ function isEmptyBlast(blast) {
         blast.d2Symbols.length === 0 &&
         blast.d3Symbols.length === 0 &&
         blast.affectedModules.length === 0 &&
+        blast.affectedFlows.length === 0 &&
         blast.riskFiles.length === 0);
 }
 function hasBlastRadius(blast) {
@@ -35135,13 +35380,75 @@ function renderArchitectureImpact(modules, detail) {
     rows.push('### Architecture Impact');
     rows.push('');
     rows.push('| Module | Hits | Direct |');
-    rows.push('|---|---|---|');
+    rows.push('|---|--:|:--:|');
     for (const m of shown) {
-        rows.push(`| \`${escapeCell(m.name)}\` | ${m.hits} | ${m.direct ? 'yes' : 'no'} |`);
+        rows.push(`| \`${escapeCell(m.name)}\` | ${m.hits} | ${m.direct ? '🟢' : '⚪'} |`);
     }
     if (sorted.length > shown.length) {
         rows.push('');
         rows.push(`_(${sorted.length - shown.length} more module${sorted.length - shown.length === 1 ? '' : 's'})_`);
+    }
+    return rows.join('\n');
+}
+/**
+ * @brief: Render the Affected Flows table (`| Process | Hits |`), sorted by
+ *         hitCount descending when present. Each flow's display name is the
+ *         first defined string of processName, name, or processId, falling
+ *         back to '(unnamed flow)'; every Hub string is run through
+ *         escapeCell (§6.1). Rows are capped at TOP_N_FLOW_ROWS at the
+ *         capped detail level with a `_(N more)_` trailer. No section
+ *         header — the caller wraps it in a collapsible block.
+ */
+function renderAffectedFlows(flows, detail) {
+    const cap = detail === 'capped' ? TOP_N_FLOW_ROWS : flows.length;
+    const sorted = [...flows].sort((a, b) => flowHits(b) - flowHits(a));
+    const shown = sorted.slice(0, cap);
+    const rows = [];
+    rows.push('| Process | Hits |');
+    rows.push('|---|--:|');
+    for (const f of shown) {
+        const hits = typeof f.hitCount === 'number' ? String(f.hitCount) : 'n/a';
+        rows.push(`| ${escapeCell(flowName(f))} | ${hits} |`);
+    }
+    if (sorted.length > shown.length) {
+        rows.push('');
+        rows.push(`_(${sorted.length - shown.length} more flow${sorted.length - shown.length === 1 ? '' : 's'})_`);
+    }
+    return rows.join('\n');
+}
+/** Narrow the flow's display name without `as`; fall back to a placeholder. */
+function flowName(flow) {
+    if (typeof flow.processName === 'string' && flow.processName)
+        return flow.processName;
+    if (typeof flow.name === 'string' && flow.name)
+        return flow.name;
+    if (typeof flow.processId === 'string' && flow.processId)
+        return flow.processId;
+    return '(unnamed flow)';
+}
+/** Numeric hit count for sorting; absent/non-numeric sorts last as 0. */
+function flowHits(flow) {
+    return typeof flow.hitCount === 'number' ? flow.hitCount : 0;
+}
+/**
+ * @brief: Render the Changed Files table (`| File | Status |`). The path is
+ *         emitted through escapeCell (§6.1) as an untrusted repo string and
+ *         the status as an emoji-prefixed badge. Rows are capped at
+ *         TOP_N_FILE_ROWS at the capped detail level with a `_(N more)_`
+ *         trailer. The caller wraps the result in a collapsible block.
+ */
+function renderChangedFiles(files, detail) {
+    const cap = detail === 'capped' ? TOP_N_FILE_ROWS : files.length;
+    const shown = files.slice(0, cap);
+    const rows = [];
+    rows.push('| File | Status |');
+    rows.push('|---|:--|');
+    for (const f of shown) {
+        rows.push(`| \`${escapeCell(f.path)}\` | ${statusBadge(f.status)} |`);
+    }
+    if (files.length > shown.length) {
+        rows.push('');
+        rows.push(`_(${files.length - shown.length} more file${files.length - shown.length === 1 ? '' : 's'})_`);
     }
     return rows.join('\n');
 }
@@ -35150,7 +35457,7 @@ function renderBlastRadius(blast, detail) {
     rows.push('### Blast Radius');
     rows.push('');
     rows.push('| Depth | Count |');
-    rows.push('|---|---|');
+    rows.push('|---|--:|');
     rows.push(`| d1 (direct)     | ${blast.d1Symbols.length} |`);
     rows.push(`| d2 (indirect)   | ${blast.d2Symbols.length} |`);
     rows.push(`| d3 (transitive) | ${blast.d3Symbols.length} |`);
@@ -35170,7 +35477,7 @@ function appendDetails(rows, summary, symbols) {
     rows.push('');
     for (const s of top) {
         const loc = formatLocation(s);
-        rows.push(`- ${loc} — \`${escapeCell(s.name)}\``);
+        rows.push(`- ${loc} · \`${escapeCell(s.name)}\``);
     }
     if (symbols.length > top.length) {
         rows.push(`- _(${symbols.length - top.length} more)_`);
@@ -35178,12 +35485,15 @@ function appendDetails(rows, summary, symbols) {
     rows.push('');
     rows.push('</details>');
 }
+/**
+ * @brief: Render the Symbol Changes table (`| Kind | Symbol | Location |`).
+ *         No section header — the caller wraps it in a collapsible block
+ *         whose summary carries the count. Capped per detail level.
+ */
 function renderSymbolChanges(symbols, detail) {
     const cap = detail === 'capped' ? TOP_N_SYMBOL_ROWS : detail === 'minimal' ? 10 : symbols.length;
     const shown = symbols.slice(0, cap);
     const rows = [];
-    rows.push('### Symbol Changes');
-    rows.push('');
     rows.push('| Kind | Symbol | Location |');
     rows.push('|---|---|---|');
     for (const s of shown) {
@@ -35216,15 +35526,18 @@ function renderApiSurfaceDelta(symbols) {
     }
     return rows.join('\n');
 }
+/**
+ * @brief: Render the File Risk table. No section header — the caller wraps
+ *         it in a collapsible block. Risk and status render as
+ *         emoji-prefixed badges; all Hub strings pass through escapeCell.
+ */
 function renderRiskFiles(riskFiles) {
     const top = riskFiles.slice(0, TOP_N_RISK_FILES);
     const rows = [];
-    rows.push('### File Risk');
-    rows.push('');
     rows.push('| File | Risk | Status | Category |');
-    rows.push('|---|---|---|---|');
+    rows.push('|---|:--|:--|---|');
     for (const f of top) {
-        rows.push(`| \`${escapeCell(f.path)}\` | ${f.risk} | ${escapeCell(f.status)} | ${escapeCell(f.category ?? '')} |`);
+        rows.push(`| \`${escapeCell(f.path)}\` | ${riskBadge(f.risk)} | ${statusBadge(f.status)} | ${escapeCell(f.category ?? '')} |`);
     }
     if (riskFiles.length > top.length) {
         rows.push('');
@@ -35232,19 +35545,71 @@ function renderRiskFiles(riskFiles) {
     }
     return rows.join('\n');
 }
-function appendFooter(parts, blast, hubUrl, truncated) {
-    parts.push('---');
-    const bits = [];
-    bits.push(`blast level \`${blast.blastLevel}\``);
-    if (blast.fileRiskLevel)
-        bits.push(`file risk \`${blast.fileRiskLevel}\``);
-    bits.push(`computed \`${blast.computedAt}\``);
-    bits.push(`[GitNexus Hub](${hubUrl})`);
-    parts.push(`_${bits.join(' · ')}_`);
-    if (truncated) {
-        parts.push('');
-        parts.push('_Comment truncated — full results on the Hub._');
+/**
+ * @brief: Deterministic, no-LLM guidance for shrinking the blast radius,
+ *         shown for any elevated PR (MEDIUM and above; LOW is skipped).
+ *         Each bullet is gated on a threshold over data already in the
+ *         comment (direct dependents, modules spanned, flows reached, the
+ *         hottest changed file, risky non-code files, PR size); the section
+ *         is omitted entirely when no rule fires. Bullets are capped so the
+ *         section stays actionable, not another dump. Returns '' when there
+ *         is nothing to recommend.
+ *
+ * @params: (blast: BlastResult) -> Normalised Hub result.
+ * @returns: string — the markdown section, or '' when not applicable.
+ */
+function renderRecommendations(blast) {
+    if (blast.blastLevel === 'LOW')
+        return '';
+    const tips = [];
+    const d1 = blast.d1Symbols.length;
+    if (d1 >= 15) {
+        tips.push(`**${d1} direct dependents.** The changed symbols are widely called, so keep changes backwards-compatible (additive over breaking). If a signature must change, add a thin wrapper that preserves the old one so callers don't all need updating in this PR.`);
     }
+    const moduleCount = blast.affectedModules.length;
+    const directModules = blast.affectedModules.filter((m) => m.direct).length;
+    if (moduleCount >= 3 || directModules >= 2) {
+        tips.push(`**Spans ${moduleCount} module${moduleCount === 1 ? '' : 's'}.** Consider splitting this PR along module lines so each change reviews and ships with a contained blast radius.`);
+    }
+    const flows = blast.affectedFlows.length;
+    if (flows >= 5) {
+        tips.push(`**Reaches ${flows} execution flows.** Gate the change behind a feature flag or stage the rollout so a regression can't hit every flow at once.`);
+    }
+    const hot = hottestFile(blast.changedSymbols);
+    if (hot && hot.count >= 8) {
+        tips.push(`**\`${escapeCell(hot.path)}\` concentrates ${hot.count} changed symbols.** Splitting this file (or carving it out of this PR) shrinks how much one change can break.`);
+    }
+    const risky = blast.riskFiles.filter((f) => f.risk === 'HIGH' || f.risk === 'CRITICAL');
+    if (risky.length > 0) {
+        const names = risky.slice(0, 3).map((f) => `\`${escapeCell(f.path)}\``).join(', ');
+        tips.push(`**Also changes ${risky.length} high-risk file${risky.length === 1 ? '' : 's'}** (${names}). Move migration/CI/infra changes into a separate PR so a logic bug can't block them, and vice versa.`);
+    }
+    if (blast.changedFiles.length >= 40) {
+        tips.push(`**Large PR (${blast.changedFiles.length} files).** Smaller, focused PRs review faster and carry a narrower blast radius.`);
+    }
+    if (tips.length === 0)
+        return '';
+    const rows = [];
+    rows.push('## How to reduce the blast radius');
+    rows.push('');
+    for (const tip of tips.slice(0, 4))
+        rows.push(`- ${tip}`);
+    return rows.join('\n');
+}
+/**
+ * @brief: The changed-symbol file with the most entries, for the hot-file
+ *         recommendation. Returns null when there are no changed symbols.
+ */
+function hottestFile(symbols) {
+    const counts = new Map();
+    for (const s of symbols)
+        counts.set(s.filePath, (counts.get(s.filePath) ?? 0) + 1);
+    let best = null;
+    for (const [path, count] of counts) {
+        if (best === null || count > best.count)
+            best = { path, count };
+    }
+    return best;
 }
 /**
  * @brief: Format a SymbolRef location as `path:line` markdown code, with
@@ -35258,13 +35623,16 @@ function formatLocation(symbol) {
 }
 /**
  * @brief: Defensively escape characters that would break a markdown table
- *         cell. The Hub-supplied strings (file paths, symbol names,
- *         module names) are untrusted-input-ish in the security-model
- *         sense — they come from the user's own repo but flow through our
- *         renderer; we treat them conservatively.
+ *         cell or inline code span. The Hub-supplied strings (file paths,
+ *         symbol names, module names) are untrusted-input-ish in the
+ *         security-model sense — they come from the user's own repo but
+ *         flow through our renderer; we treat them conservatively.
+ *
+ *         Backticks are replaced (not backslash-escaped) because GFM code
+ *         spans delimited by a single ` cannot contain literal backticks.
  */
 function escapeCell(value) {
-    return value.replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+    return value.replace(/\|/g, '\\|').replace(/`/g, "'").replace(/\r?\n/g, ' ');
 }
 
 
@@ -35296,10 +35664,25 @@ function escapeCell(value) {
  * @params: (stale)           -> Computed against an older indexed commit than the current HEAD.
  * @params: (prTitle/prAuthor/prBranch/prStatus) -> PR-level metadata; either party may set null.
  * @params: (computedAt)      -> ISO timestamp when the Hub last computed the result.
+ * @params: (crossRepo)       -> Cross-repo blast envelope; optional for back-compat with older Hub builds. Accepted + preserved here, rendered later.
  */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.EMPTY_CROSS_REPO = void 0;
 exports.isBlastResult = isBlastResult;
 exports.normalizeBlastResult = normalizeBlastResult;
+/**
+ * @brief: Zero-state cross-repo envelope. Byte-matches the Hub's own
+ *         zero-state literal in routes/blast.ts so an Action that fills a
+ *         missing `crossRepo` produces exactly what a fresh Hub would have
+ *         sent for a repo with no ready groups.
+ */
+exports.EMPTY_CROSS_REPO = {
+    schemaVersion: '1',
+    findings: [],
+    groups: [],
+    truncated: false,
+    error: null,
+};
 /**
  * @brief: Validate that an unknown value matches the BlastResult shape we
  *         expect from the Hub. Tolerates absent arrays (treats them as []
@@ -35324,7 +35707,10 @@ function isBlastResult(value) {
     // stale + prStatus arrived later in the Hub schema; older deployments
     // may omit them. Accept either shape so the Action keeps working across
     // a window of Hub versions; renderer fills defaults.
-    if ('stale' in value && typeof value.stale !== 'boolean' && value.stale !== undefined) {
+    if ('stale' in value &&
+        value.stale !== null &&
+        value.stale !== undefined &&
+        typeof value.stale !== 'boolean') {
         return false;
     }
     const arrayFields = [
@@ -35353,6 +35739,19 @@ function isBlastResult(value) {
     // graphData is optional in old Hub builds and always present in new ones.
     if ('graphData' in value && value.graphData !== null && value.graphData !== undefined) {
         if (!isObject(value.graphData))
+            return false;
+    }
+    // crossRepo arrived later in the Hub schema; older deployments omit it.
+    // Shallow tolerance only — when present, require an object whose findings
+    // and groups (if present) are arrays. The per-finding shape is the
+    // renderer's concern, so we do NOT validate beyond that.
+    if ('crossRepo' in value && value.crossRepo !== null && value.crossRepo !== undefined) {
+        if (!isObject(value.crossRepo))
+            return false;
+        const { findings, groups } = value.crossRepo;
+        if (findings !== null && findings !== undefined && !Array.isArray(findings))
+            return false;
+        if (groups !== null && groups !== undefined && !Array.isArray(groups))
             return false;
     }
     return true;
@@ -35384,6 +35783,7 @@ function normalizeBlastResult(value) {
         fileRiskLevel: clampOptionalBlastLevel(value.fileRiskLevel),
         riskFiles: value.riskFiles ?? [],
         graphData: value.graphData ?? { nodes: [], links: [] },
+        crossRepo: normalizeCrossRepo(value.crossRepo),
         truncated: Boolean(value.truncated),
         stale: Boolean(value.stale),
         prTitle: value.prTitle ?? null,
@@ -35395,6 +35795,32 @@ function normalizeBlastResult(value) {
 }
 function isObject(v) {
     return typeof v === 'object' && v !== null;
+}
+/**
+ * @brief: Coerce an unknown `crossRepo` value into a well-formed
+ *         CrossRepoResult so the renderer can read it without `??` on every
+ *         field. Returns EMPTY_CROSS_REPO when the value is absent or not an
+ *         object; otherwise fills each field with a type-checked default.
+ *         `findings`/`groups` are passed through verbatim when they are arrays.
+ *
+ *         Intentionally NOT version-aware: `schemaVersion` is preserved as-is
+ *         (defaulting to '1' only when non-string). "Degrade on unknown
+ *         version" logic is deferred to the renderer PR.
+ *
+ * @params: (v: unknown) -> The `crossRepo` field off a Hub response body.
+ *
+ * @returns: CrossRepoResult — always a complete envelope.
+ */
+function normalizeCrossRepo(v) {
+    if (!isObject(v))
+        return exports.EMPTY_CROSS_REPO;
+    return {
+        schemaVersion: typeof v.schemaVersion === 'string' ? v.schemaVersion : '1',
+        findings: Array.isArray(v.findings) ? v.findings : [],
+        groups: Array.isArray(v.groups) ? v.groups : [],
+        truncated: Boolean(v.truncated),
+        error: typeof v.error === 'string' ? v.error : null,
+    };
 }
 function clampBlastLevel(v) {
     return v === 'LOW' || v === 'MEDIUM' || v === 'HIGH' || v === 'CRITICAL' ? v : 'LOW';

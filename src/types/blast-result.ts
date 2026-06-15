@@ -19,6 +19,7 @@
  * @params: (stale)           -> Computed against an older indexed commit than the current HEAD.
  * @params: (prTitle/prAuthor/prBranch/prStatus) -> PR-level metadata; either party may set null.
  * @params: (computedAt)      -> ISO timestamp when the Hub last computed the result.
+ * @params: (crossRepo)       -> Cross-repo blast envelope; optional for back-compat with older Hub builds. Accepted + preserved here, rendered later.
  */
 
 export type BlastLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
@@ -70,14 +71,24 @@ export interface RiskFile {
 }
 
 /**
- * @brief: Flow record — Hub-side processName + symbols. The Hub may emit
- *         richer fields in the future; render-comment treats this as opaque
- *         for v1 (no section yet) but the type accepts arbitrary keys.
+ * @brief: Execution flow touched by the PR, as reported by the Hub. All
+ *         fields are optional because the Hub populates them opportunistically
+ *         depending on what the flow analyser resolved; the renderer narrows
+ *         each field with a `typeof` guard before use rather than trusting
+ *         presence.
+ *
+ * @params: (name)        -> Legacy display name (older Hub builds).
+ * @params: (processId)   -> Stable id of the execution flow / process.
+ * @params: (processName) -> Human-readable flow name; preferred for display.
+ * @params: (hitSymbols)  -> Symbol names within the flow that the change touched.
+ * @params: (hitCount)    -> Number of touched symbols; drives row ordering.
  */
 export interface AffectedFlow {
   name?: string;
+  processId?: string;
   processName?: string;
-  [extra: string]: unknown;
+  hitSymbols?: string[];
+  hitCount?: number;
 }
 
 /**
@@ -89,6 +100,104 @@ export interface BlastGraphData {
   nodes: ReadonlyArray<{ [k: string]: unknown }>;
   links: ReadonlyArray<{ [k: string]: unknown }>;
 }
+
+/**
+ * @brief: A consumer in another repo references a symbol changed in this PR.
+ *         `kind` is the renderer's switch discriminant; the remaining fields
+ *         are tolerated-optional in spirit (the Hub may add more), but the
+ *         renderer only reads what it needs and guards each access.
+ */
+export interface SymbolCrossRepoFinding {
+  kind: 'symbol';
+  consumerRepo: string;
+  consumerSymbol: { name: string; filePath: string } | null;
+  providerSymbol: { name: string; filePath: string; symbolLabel: string } | null;
+  via: string;
+  edgeType: string;
+  detectionTier: string;
+  confidence: number;
+}
+
+/** A whole repo consumes a changed contract artifact (HTTP route, proto, topic, …). */
+export interface ContractCrossRepoFinding {
+  kind: 'contract';
+  consumerRepo: string;
+  via: string;
+  changedFile?: string; // present only on Hubs that resolve the defining file
+  edgeType: string;
+  detectionTier: string;
+  confidence: number;
+}
+
+/** The changed symbol is a step in a cross-repo execution flow. */
+export interface FlowCrossRepoFinding {
+  kind: 'flow';
+  consumerRepo: string; // '' — a flow spans repos; see flow.repoIds
+  via: string;
+  flow: { label: string; step: number; stepCount: number; repoIds: string[] };
+  edgeType: string;
+  detectionTier: string;
+  confidence: number;
+}
+
+/**
+ * @brief: Discriminated union of every cross-repo finding kind. The renderer
+ *         switches on `kind` with a default no-op, so an unknown future kind
+ *         (e.g. the reserved 'breakage') renders as nothing rather than throwing.
+ */
+export type CrossRepoFinding =
+  | SymbolCrossRepoFinding
+  | ContractCrossRepoFinding
+  | FlowCrossRepoFinding;
+
+/** Per-group metadata. `name` is wire-only — the renderer NEVER prints it (§5.2). */
+export interface CrossRepoGroup {
+  id: string;
+  name: string;
+  lastAnalyzedAt: string | null;
+  stale: boolean;
+}
+
+/**
+ * @brief: Cross-repo blast-radius envelope returned by the Hub alongside the
+ *         single-repo result. The Hub emits a populated envelope when the
+ *         repo belongs to a ready group, or a zero-state envelope otherwise;
+ *         either way the field is always present on new Hub builds.
+ *
+ *         `findings`/`groups` are typed unions for the renderer to switch on;
+ *         `normalizeCrossRepo` validates only that they are arrays (shallow,
+ *         trust-boundary) and casts — the renderer tolerates unknown members.
+ *
+ * @params: (schemaVersion) -> Hub envelope schema tag. A value other than '1'
+ *                             degrades to an error envelope at normalize time
+ *                             (we cannot safely render unknown semantics).
+ * @params: (findings)      -> Cross-repo findings (symbol / contract / flow).
+ * @params: (groups)        -> Per-group metadata (id, name, freshness).
+ * @params: (truncated)     -> Hub-side cap marker on the findings list.
+ * @params: (error)         -> Non-null when the join could-not-run; null when it
+ *                             ran cleanly (distinct from an empty findings list).
+ */
+export interface CrossRepoResult {
+  schemaVersion: string;
+  findings: CrossRepoFinding[];
+  groups: CrossRepoGroup[];
+  truncated: boolean;
+  error: string | null;
+}
+
+/**
+ * @brief: Zero-state cross-repo envelope. Byte-matches the Hub's own
+ *         zero-state literal in routes/blast.ts so an Action that fills a
+ *         missing `crossRepo` produces exactly what a fresh Hub would have
+ *         sent for a repo with no ready groups.
+ */
+export const EMPTY_CROSS_REPO: CrossRepoResult = {
+  schemaVersion: '1',
+  findings: [],
+  groups: [],
+  truncated: false,
+  error: null,
+};
 
 export interface BlastResult {
   blastLevel: BlastLevel;
@@ -116,6 +225,11 @@ export interface BlastResult {
   prStatus: string | null;
 
   computedAt: string; // ISO timestamp
+
+  // keep optional — do not tighten. render-comment.test.ts passes un-cast
+  // object literals straight into normalizeBlastResult(value: BlastResult);
+  // a required field would break those ~10 literals at compile time.
+  crossRepo?: CrossRepoResult;
 }
 
 /**
@@ -140,7 +254,12 @@ export function isBlastResult(value: unknown): value is BlastResult {
   // stale + prStatus arrived later in the Hub schema; older deployments
   // may omit them. Accept either shape so the Action keeps working across
   // a window of Hub versions; renderer fills defaults.
-  if ('stale' in value && typeof value.stale !== 'boolean' && value.stale !== undefined) {
+  if (
+    'stale' in value &&
+    value.stale !== null &&
+    value.stale !== undefined &&
+    typeof value.stale !== 'boolean'
+  ) {
     return false;
   }
 
@@ -174,6 +293,17 @@ export function isBlastResult(value: unknown): value is BlastResult {
     if (!isObject(value.graphData)) return false;
   }
 
+  // crossRepo arrived later in the Hub schema; older deployments omit it.
+  // Shallow tolerance only — when present, require an object whose findings
+  // and groups (if present) are arrays. The per-finding shape is the
+  // renderer's concern, so we do NOT validate beyond that.
+  if ('crossRepo' in value && value.crossRepo !== null && value.crossRepo !== undefined) {
+    if (!isObject(value.crossRepo)) return false;
+    const { findings, groups } = value.crossRepo;
+    if (findings !== null && findings !== undefined && !Array.isArray(findings)) return false;
+    if (groups !== null && groups !== undefined && !Array.isArray(groups)) return false;
+  }
+
   return true;
 }
 
@@ -204,6 +334,7 @@ export function normalizeBlastResult(value: BlastResult): BlastResult {
     fileRiskLevel: clampOptionalBlastLevel(value.fileRiskLevel),
     riskFiles: value.riskFiles ?? [],
     graphData: value.graphData ?? { nodes: [], links: [] },
+    crossRepo: normalizeCrossRepo(value.crossRepo),
     truncated: Boolean(value.truncated),
     stale: Boolean(value.stale),
     prTitle: value.prTitle ?? null,
@@ -216,6 +347,46 @@ export function normalizeBlastResult(value: BlastResult): BlastResult {
 
 function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null;
+}
+
+/**
+ * @brief: Coerce an unknown `crossRepo` value into a well-formed
+ *         CrossRepoResult so the renderer can read it without `??` on every
+ *         field. Returns EMPTY_CROSS_REPO when the value is absent or not an
+ *         object; otherwise fills each field with a type-checked default.
+ *         `findings`/`groups` are passed through verbatim when they are arrays.
+ *
+ *         Version-aware: a `schemaVersion` other than '1' degrades to an error
+ *         envelope (empty findings + an `error`) rather than mis-rendering data
+ *         whose semantics may have changed — the schemaVersion exists for this.
+ *
+ * @params: (v: unknown) -> The `crossRepo` field off a Hub response body.
+ *
+ * @returns: CrossRepoResult — always a complete envelope.
+ */
+function normalizeCrossRepo(v: unknown): CrossRepoResult {
+  if (!isObject(v)) return EMPTY_CROSS_REPO;
+  const sv = typeof v.schemaVersion === 'string' ? v.schemaVersion : undefined;
+  if (sv !== undefined && sv !== '1') {
+    return {
+      schemaVersion: '1',
+      findings: [],
+      groups: [],
+      truncated: false,
+      error: `unsupported crossRepo schema version: ${sv}`,
+    };
+  }
+  // Shallow trust-boundary validation: confirm arrays, then cast. The renderer
+  // switches on `kind` with a default no-op, so malformed members render as
+  // nothing rather than throwing — deep per-finding validation would reject
+  // valid responses from a Hub that adds fields.
+  return {
+    schemaVersion: '1',
+    findings: Array.isArray(v.findings) ? (v.findings as CrossRepoFinding[]) : [],
+    groups: Array.isArray(v.groups) ? (v.groups as CrossRepoGroup[]) : [],
+    truncated: Boolean(v.truncated),
+    error: typeof v.error === 'string' ? v.error : null,
+  };
 }
 
 function clampBlastLevel(v: string): BlastLevel {
