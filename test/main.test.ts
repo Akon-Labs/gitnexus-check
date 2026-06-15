@@ -1,298 +1,266 @@
 /**
- * Orchestration test for src/main.ts. We mock @actions/core,
- * @actions/github, the hub-client module, and post-comment module so the
- * test asserts wiring (sequence, output-setting, setFailed-on-error) and
- * does not perform any I/O.
+ * Orchestration tests for src/main.ts. We mock every collaborator
+ * (axios, @actions/exec, github.context, fs writes via tmpdir) and
+ * assert on the high-level wiring:
+ *
+ *   - happy path with reindex (big-diff): bundle + upload + poll runs,
+ *     context-pack fetched, artifacts written, outputs set.
+ *   - lazy-skip path (small diff, no label): no bundle/upload, just
+ *     context-pack + artifacts.
+ *   - deep-review label opt-in: even on a small diff, reindex runs.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 
+// We need to mock @actions/core, @actions/github, @actions/exec, and
+// axios BEFORE importing main. Hoist the mocks.
+
+vi.mock('@actions/exec', () => ({
+  exec: vi.fn().mockResolvedValue(0),
+}));
+
+vi.mock('axios', () => ({
+  default: {
+    get: vi.fn(),
+    post: vi.fn(),
+  },
+}));
+
+// In-memory step output store so we can assert what main() set.
 const outputs: Record<string, string> = {};
 const inputs: Record<string, string> = {};
-const setFailedSpy = vi.fn();
-const warningSpy = vi.fn();
-const errorSpy = vi.fn();
 
 vi.mock('@actions/core', () => ({
-  getInput: vi.fn((name: string, opts?: { required?: boolean }) => {
-    const v = inputs[name] ?? '';
-    if (opts?.required && !v) throw new Error(`Input required: ${name}`);
-    return v;
-  }),
+  getInput: vi.fn((name: string) => inputs[name] ?? ''),
   setOutput: vi.fn((name: string, value: string) => {
     outputs[name] = value;
   }),
-  setFailed: setFailedSpy,
+  setFailed: vi.fn(),
   info: vi.fn(),
-  warning: warningSpy,
-  error: errorSpy,
+  warning: vi.fn(),
+  startGroup: vi.fn(),
+  endGroup: vi.fn(),
 }));
 
 const ghContext = {
   eventName: 'pull_request',
   payload: {
     pull_request: {
-      number: 152,
+      number: 42,
+      head: { ref: 'feat/x', sha: 'headsha' },
+      base: { sha: 'basesha' },
+      html_url: 'https://github.com/a/b/pull/42',
+      labels: [] as Array<{ name: string }>,
     },
   },
-  repo: { owner: 'Akon-Labs', repo: 'gitnexus-enterprise' },
+  repo: { owner: 'a', repo: 'b' },
 };
-
-const getOctokitSpy = vi.fn(() => ({
-  paginate: { iterator: vi.fn() },
-  rest: {
-    issues: {
-      createComment: vi.fn(),
-      updateComment: vi.fn(),
-    },
-  },
-}));
 
 vi.mock('@actions/github', () => ({
   context: ghContext,
-  getOctokit: getOctokitSpy,
 }));
 
-const resolveSpy = vi.fn();
-const refreshSpy = vi.fn();
-const getBlastSpy = vi.fn();
+import axios from 'axios';
+import * as exec from '@actions/exec';
 
-vi.mock('../src/hub-client', async () => {
-  const real = await vi.importActual<typeof import('../src/hub-client')>('../src/hub-client');
-  return {
-    ...real,
-    resolveRepoId: (...args: unknown[]) => resolveSpy(...args),
-    refreshBlast: (...args: unknown[]) => refreshSpy(...args),
-    getBlast: (...args: unknown[]) => getBlastSpy(...args),
-  };
-});
+const mockedAxios = vi.mocked(axios, true);
+const mockedExec = vi.mocked(exec.exec);
 
-const postSpy = vi.fn();
-vi.mock('../src/post-comment', async () => {
-  const real = await vi.importActual<typeof import('../src/post-comment')>(
-    '../src/post-comment',
-  );
-  return {
-    ...real,
-    postOrUpdateComment: (...args: unknown[]) => postSpy(...args),
-    asIssueCommentsClient: vi.fn(() => ({})),
-  };
-});
+let workspace: string;
+let originalWorkspace: string | undefined;
+let originalCwd: string;
 
-const parseThresholdSpy = vi.fn();
-const evaluateGateSpy = vi.fn();
-vi.mock('../src/gate', async () => {
-  const real = await vi.importActual<typeof import('../src/gate')>('../src/gate');
-  return {
-    ...real,
-    parseThreshold: (...args: unknown[]) => parseThresholdSpy(...args),
-    evaluateGate: (...args: unknown[]) => evaluateGateSpy(...args),
-  };
-});
+function resetMain(): void {
+  // main.ts auto-runs on import. We re-import per-test to retrigger
+  // the orchestration with fresh mocks. The vitest module cache must
+  // be cleared between runs.
+  vi.resetModules();
+}
 
-function loadFullBlast(): unknown {
-  return JSON.parse(
-    fs.readFileSync(path.join(__dirname, 'fixtures', 'blast-result-full.json'), 'utf8'),
-  );
+function setHappyPathMocks(opts: {
+  status?: 'ready' | 'pending';
+  bigDiff: boolean;
+  rename?: boolean;
+}): void {
+  // /api/repos -> resolveRepoId
+  mockedAxios.get.mockImplementation(async (url: string) => {
+    if (url.endsWith('/api/repos')) {
+      return { data: { repos: [{ id: 'repoid', fullName: 'a/b' }] } };
+    }
+    if (url.includes('/branch-reindex/') && url.endsWith('/status')) {
+      return { data: { status: 'ready', indexedCommit: 'deadbeef' } };
+    }
+    throw new Error(`unexpected GET ${url}`);
+  });
+
+  mockedAxios.post.mockImplementation(async (url: string) => {
+    if (url.includes('/branch-reindex')) {
+      return {
+        data: {
+          id: 'job1',
+          status: 'queued',
+          statusUrl: '/api/repos/repoid/branch-reindex/42/status',
+        },
+      };
+    }
+    if (url.includes('/context-pack')) {
+      return {
+        data: {
+          schemaVersion: 1,
+          repo: { id: 'repoid', fullName: 'a/b', indexedCommit: null, lastIndexedAt: null },
+          warningsForClaude: [],
+        },
+      };
+    }
+    throw new Error(`unexpected POST ${url}`);
+  });
+
+  // git diff --numstat output
+  const numstat = opts.bigDiff
+    ? Array.from({ length: 60 }, (_, i) => `1\t1\tsrc/f${i}.ts`).join('\n') + '\n'
+    : opts.rename
+      ? '5\t2\tsrc/old.ts\tsrc/new.ts\n'
+      : '10\t2\tsrc/a.ts\n';
+  const nameStatus = opts.bigDiff
+    ? Array.from({ length: 60 }, (_, i) => `M\tsrc/f${i}.ts`).join('\n') + '\n'
+    : opts.rename
+      ? 'R100\tsrc/old.ts\tsrc/new.ts\n'
+      : 'M\tsrc/a.ts\n';
+
+  mockedExec.mockImplementation(async (_cmd, args, options) => {
+    const argv = (args ?? []).join(' ');
+    if (argv.startsWith('diff --numstat')) {
+      options?.listeners?.stdout?.(Buffer.from(numstat));
+      return 0;
+    }
+    if (argv.startsWith('diff --name-status')) {
+      options?.listeners?.stdout?.(Buffer.from(nameStatus));
+      return 0;
+    }
+    // update-ref / bundle create — succeed silently
+    return 0;
+  });
 }
 
 beforeEach(() => {
+  workspace = fs.mkdtempSync(path.join(os.tmpdir(), 'gnx-main-test-'));
+  originalWorkspace = process.env.GITHUB_WORKSPACE;
+  process.env.GITHUB_WORKSPACE = workspace;
+  originalCwd = process.cwd();
+
+  // Reset shared state.
   for (const k of Object.keys(outputs)) delete outputs[k];
   for (const k of Object.keys(inputs)) delete inputs[k];
   inputs['hub-url'] = 'https://hub.example.com';
   inputs['token'] = 'gnx_test';
-  inputs['github-token'] = 'ghp_test';
-  ghContext.eventName = 'pull_request';
-  ghContext.payload.pull_request.number = 152;
-  setFailedSpy.mockReset();
-  warningSpy.mockReset();
-  errorSpy.mockReset();
-  resolveSpy.mockReset();
-  refreshSpy.mockReset();
-  getBlastSpy.mockReset();
-  postSpy.mockReset();
-  parseThresholdSpy.mockReset();
-  evaluateGateSpy.mockReset();
-  // Default: advisory gate (empty input → null threshold → neutral).
-  parseThresholdSpy.mockReturnValue(null);
-  evaluateGateSpy.mockReturnValue('neutral');
-  vi.resetModules();
+  inputs['deep-review-label'] = 'gitnexus-deep-review';
+  inputs['lazy-reindex'] = 'true';
+  ghContext.payload.pull_request.labels = [];
+  mockedAxios.get.mockReset();
+  mockedAxios.post.mockReset();
+  mockedExec.mockReset();
 });
 
-describe('main — happy path', () => {
-  it('resolves, refreshes, fetches, renders, posts; sets outputs', async () => {
-    resolveSpy.mockResolvedValue('repo-uuid');
-    refreshSpy.mockResolvedValue(undefined);
-    const blastRaw = loadFullBlast();
-    const { isBlastResult, normalizeBlastResult } = await import(
-      '../src/types/blast-result'
-    );
-    if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
-    getBlastSpy.mockResolvedValue(normalizeBlastResult(blastRaw));
-    postSpy.mockResolvedValue({ commentId: 5555, action: 'created' });
-
-    const { main } = await import('../src/main');
-    await main();
-
-    expect(resolveSpy).toHaveBeenCalledOnce();
-    expect(refreshSpy).toHaveBeenCalledOnce();
-    expect(getBlastSpy).toHaveBeenCalledOnce();
-    expect(postSpy).toHaveBeenCalledOnce();
-    expect(outputs['comment-id']).toBe('5555');
-    expect(outputs['blast-level']).toBe('LOW');
-    expect(setFailedSpy).not.toHaveBeenCalled();
-  });
-});
-
-describe('main — non-PR event', () => {
-  it('warns and exits cleanly without calling Hub', async () => {
-    ghContext.eventName = 'push';
-    const { main } = await import('../src/main');
-    await main();
-    expect(warningSpy).toHaveBeenCalled();
-    expect(resolveSpy).not.toHaveBeenCalled();
-    expect(setFailedSpy).not.toHaveBeenCalled();
-  });
-});
-
-describe('main — Hub error path', () => {
-  it('calls setFailed with classified message when resolveRepoId throws', async () => {
-    resolveSpy.mockRejectedValue(new Error('repo a/b not registered on Hub'));
-    const { main } = await import('../src/main');
-    await main();
-    expect(setFailedSpy).toHaveBeenCalledOnce();
-    const msg = setFailedSpy.mock.calls[0][0] as string;
-    expect(msg).toContain('resolveRepoId');
-    expect(refreshSpy).not.toHaveBeenCalled();
-  });
-
-  it('classifies axios 401 from Hub correctly', async () => {
-    const err = {
-      isAxiosError: true,
-      response: { status: 401, statusText: '', headers: {} },
-      config: { url: 'https://hub.example.com/api/repos' },
-    };
-    resolveSpy.mockRejectedValue(err);
-    const { main } = await import('../src/main');
-    await main();
-    const msg = setFailedSpy.mock.calls[0][0] as string;
-    expect(msg).toContain('GNX_TOKEN is invalid or revoked');
-  });
-});
-
-describe('main — GitHub error path', () => {
-  it('classifies 403 from GitHub as missing permission', async () => {
-    resolveSpy.mockResolvedValue('repo-uuid');
-    refreshSpy.mockResolvedValue(undefined);
-    const blastRaw = loadFullBlast();
-    const { isBlastResult, normalizeBlastResult } = await import(
-      '../src/types/blast-result'
-    );
-    if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
-    getBlastSpy.mockResolvedValue(normalizeBlastResult(blastRaw));
-    const err = {
-      isAxiosError: true,
-      response: { status: 403, statusText: '', headers: {} },
-      config: { url: 'https://api.github.com/repos/a/b/issues/1/comments' },
-    };
-    postSpy.mockRejectedValue(err);
-
-    const { main } = await import('../src/main');
-    await main();
-    const msg = setFailedSpy.mock.calls[0][0] as string;
-    expect(msg).toContain('missing pull-requests:write permission');
-  });
-});
-
-describe('main — gate', () => {
-  async function setupHappy(): Promise<void> {
-    resolveSpy.mockResolvedValue('repo-uuid');
-    refreshSpy.mockResolvedValue(undefined);
-    const blastRaw = loadFullBlast();
-    const { isBlastResult, normalizeBlastResult } = await import('../src/types/blast-result');
-    if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
-    getBlastSpy.mockResolvedValue(normalizeBlastResult(blastRaw));
-    postSpy.mockResolvedValue({ commentId: 5555, action: 'created' });
+afterEach(() => {
+  if (originalWorkspace === undefined) {
+    delete process.env.GITHUB_WORKSPACE;
+  } else {
+    process.env.GITHUB_WORKSPACE = originalWorkspace;
   }
+  fs.rmSync(workspace, { recursive: true, force: true });
+});
 
-  it('advisory default: neutral decision, no setFailed', async () => {
-    await setupHappy();
-    parseThresholdSpy.mockReturnValue(null);
-    evaluateGateSpy.mockReturnValue('neutral');
-    const { main } = await import('../src/main');
-    await main();
-    expect(outputs['gate-decision']).toBe('neutral');
-    expect(setFailedSpy).not.toHaveBeenCalled();
-  });
+describe('main — happy path with full reindex (big diff)', () => {
+  it('bundles, uploads, polls, fetches context pack, writes artifacts', async () => {
+    setHappyPathMocks({ bigDiff: true });
+    resetMain();
+    await import('../src/main');
+    // Allow the auto-run main() promise chain to settle.
+    await new Promise((r) => setImmediate(r));
 
-  it('pass: no setFailed and comment still posted', async () => {
-    await setupHappy();
-    inputs['fail-on-blast-level'] = 'CRITICAL';
-    parseThresholdSpy.mockReturnValue('CRITICAL');
-    evaluateGateSpy.mockReturnValue('pass');
-    const { main } = await import('../src/main');
-    await main();
-    expect(outputs['gate-decision']).toBe('pass');
-    expect(postSpy).toHaveBeenCalledOnce();
-    expect(setFailedSpy).not.toHaveBeenCalled();
-  });
+    // Bundle was created (update-ref + bundle create).
+    const execCalls = mockedExec.mock.calls.map((c) => c[1]?.join(' ') ?? '');
+    expect(execCalls.some((c) => c.startsWith('update-ref'))).toBe(true);
+    expect(execCalls.some((c) => c.startsWith('bundle create'))).toBe(true);
 
-  it('fail: setFailed called AFTER the comment is posted', async () => {
-    await setupHappy();
-    inputs['fail-on-blast-level'] = 'LOW';
-    parseThresholdSpy.mockReturnValue('LOW');
-    evaluateGateSpy.mockReturnValue('fail');
-    let postCallOrder = -1;
-    let failCallOrder = -1;
-    let counter = 0;
-    postSpy.mockImplementation(() => {
-      postCallOrder = counter++;
-      return Promise.resolve({ commentId: 5555, action: 'created' });
-    });
-    setFailedSpy.mockImplementation(() => {
-      failCallOrder = counter++;
-    });
-    const { main } = await import('../src/main');
-    await main();
-    expect(outputs['gate-decision']).toBe('fail');
-    expect(setFailedSpy).toHaveBeenCalledOnce();
-    expect(postCallOrder).toBeGreaterThanOrEqual(0);
-    expect(failCallOrder).toBeGreaterThan(postCallOrder);
-  });
+    // Bundle uploaded.
+    const postUrls = mockedAxios.post.mock.calls.map((c) => c[0]);
+    expect(postUrls.some((u: string) => u.endsWith('/branch-reindex'))).toBe(true);
 
-  it('invalid threshold: setFailed before any Hub call', async () => {
-    inputs['fail-on-blast-level'] = 'bogus';
-    parseThresholdSpy.mockImplementation(() => {
-      throw new Error('fail-on-blast-level: invalid value "bogus" — expected LOW, MEDIUM, HIGH, or CRITICAL');
-    });
-    const { main } = await import('../src/main');
-    await main();
-    expect(setFailedSpy).toHaveBeenCalledOnce();
-    const msg = setFailedSpy.mock.calls[0][0] as string;
-    expect(msg).toContain('parseThreshold');
-    expect(msg).toContain('invalid value');
-    expect(resolveSpy).not.toHaveBeenCalled();
-    expect(refreshSpy).not.toHaveBeenCalled();
-    expect(getBlastSpy).not.toHaveBeenCalled();
+    // Status polled.
+    const getUrls = mockedAxios.get.mock.calls.map((c) => c[0]);
+    expect(getUrls.some((u: string) => u.includes('/branch-reindex/42/status'))).toBe(true);
+
+    // Context pack fetched.
+    expect(postUrls.some((u: string) => u.endsWith('/context-pack'))).toBe(true);
+
+    // Artifacts written under workspace.
+    expect(fs.existsSync(path.join(workspace, '.gitnexus', 'context-pack.json'))).toBe(true);
+    expect(fs.existsSync(path.join(workspace, '.gitnexus', 'system-prompt.md'))).toBe(true);
+    expect(fs.existsSync(path.join(workspace, '.claude', 'gitnexus-mcp.json'))).toBe(true);
+
+    // Outputs set with absolute paths.
+    expect(outputs['context-pack-path']).toBe(
+      path.join(workspace, '.gitnexus', 'context-pack.json'),
+    );
+    expect(outputs['system-prompt-path']).toBe(
+      path.join(workspace, '.gitnexus', 'system-prompt.md'),
+    );
+    expect(outputs['mcp-config-path']).toBe(path.join(workspace, '.claude', 'gitnexus-mcp.json'));
+    expect(outputs['indexed-commit']).toBe('deadbeef');
   });
 });
 
-describe('main — token safety', () => {
-  it('does not leak the GNX_TOKEN into any setFailed / warning / error call', async () => {
-    inputs['token'] = 'gnx_secret_VERY_DO_NOT_LEAK';
-    resolveSpy.mockRejectedValue(
-      new Error('boom with token leak gnx_secret_VERY_DO_NOT_LEAK in message'),
-    );
-    const { main } = await import('../src/main');
-    await main();
-    const allCalls = [
-      ...setFailedSpy.mock.calls,
-      ...warningSpy.mock.calls,
-      ...errorSpy.mock.calls,
-    ]
-      .map((c) => c.map((x) => String(x)).join(' '))
-      .join('\n');
-    expect(allCalls).not.toContain('gnx_secret_VERY_DO_NOT_LEAK');
+describe('main — lazy-skip path (small diff, no label)', () => {
+  it('skips bundle + upload, only fetches context pack', async () => {
+    setHappyPathMocks({ bigDiff: false });
+    resetMain();
+    await import('../src/main');
+    await new Promise((r) => setImmediate(r));
+
+    // No bundle / no upload.
+    const execCalls = mockedExec.mock.calls.map((c) => c[1]?.join(' ') ?? '');
+    expect(execCalls.some((c) => c.startsWith('update-ref'))).toBe(false);
+    expect(execCalls.some((c) => c.startsWith('bundle create'))).toBe(false);
+
+    const postUrls = mockedAxios.post.mock.calls.map((c) => c[0]);
+    expect(postUrls.some((u: string) => u.endsWith('/branch-reindex'))).toBe(false);
+
+    // Context pack still fetched.
+    expect(postUrls.some((u: string) => u.endsWith('/context-pack'))).toBe(true);
+
+    // Artifacts written.
+    expect(fs.existsSync(path.join(workspace, '.gitnexus', 'context-pack.json'))).toBe(true);
+    expect(outputs['context-pack-path']).toBeTruthy();
+    expect(outputs['indexed-commit']).toBeUndefined();
+  });
+});
+
+describe('main — deep-review label opt-in', () => {
+  it('forces reindex even on a small diff', async () => {
+    setHappyPathMocks({ bigDiff: false });
+    ghContext.payload.pull_request.labels = [{ name: 'gitnexus-deep-review' }];
+    resetMain();
+    await import('../src/main');
+    await new Promise((r) => setImmediate(r));
+
+    const postUrls = mockedAxios.post.mock.calls.map((c) => c[0]);
+    expect(postUrls.some((u: string) => u.endsWith('/branch-reindex'))).toBe(true);
+    expect(outputs['indexed-commit']).toBe('deadbeef');
+  });
+});
+
+describe('main — rename triggers reindex', () => {
+  it('reindexes when diff contains a rename, even on small file count', async () => {
+    setHappyPathMocks({ bigDiff: false, rename: true });
+    resetMain();
+    await import('../src/main');
+    await new Promise((r) => setImmediate(r));
+
+    const postUrls = mockedAxios.post.mock.calls.map((c) => c[0]);
+    expect(postUrls.some((u: string) => u.endsWith('/branch-reindex'))).toBe(true);
   });
 });

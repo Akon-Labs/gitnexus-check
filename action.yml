@@ -1,28 +1,30 @@
-name: 'GitNexus Review'
-description: 'Posts a GitNexus blast-radius review comment on the PR by calling the GitNexus Enterprise Hub.'
-author: 'Akon Labs'
+name: 'GitNexus Prep'
+description: 'Bundles, computes Context Pack, and emits artifacts for Claude PR review.'
+author: 'GitNexus'
 inputs:
   hub-url:
-    description: 'GitNexus Hub base URL (e.g. https://app.akonlabs.com). Required, no default, so users cannot accidentally hit a wrong server.'
+    description: 'GitNexus Hub base URL (e.g. https://hub.gitnexus.io). Required — no default so users cannot accidentally hit a wrong server. The `gnx install-ci` CLI always renders this explicitly into the workflow YAML.'
     required: true
   token:
-    description: 'GitNexus CI token (gnx_...). Store as a repo secret (e.g. GITNEXUS_TOKEN) and pass via the workflow.'
+    description: 'GitNexus CI token (gnx_...)'
     required: true
-  github-token:
-    description: 'GitHub token used to post the PR comment. Defaults to the auto-issued workflow token.'
+  deep-review-label:
+    description: 'PR label that forces a full reindex (skips lazy path).'
     required: false
-    default: ${{ github.token }}
-  fail-on-blast-level:
-    description: 'Optional gate. Accepts LOW | MEDIUM | HIGH | CRITICAL. When set, the action fails the workflow if the PR blast level meets or exceeds this value (after posting the comment). Empty (default) is advisory and never fails.'
+    default: 'gitnexus-deep-review'
+  lazy-reindex:
+    description: 'Whether to skip reindex on small diffs without renames or the deep-review label.'
     required: false
-    default: ''
+    default: 'true'
 outputs:
-  comment-id:
-    description: 'GitHub comment id we created or updated.'
-  blast-level:
-    description: 'Overall blast level returned by the Hub: LOW | MEDIUM | HIGH | CRITICAL.'
-  gate-decision:
-    description: 'Gate outcome: pass | fail | neutral. neutral means the gate was advisory (no fail-on-blast-level set).'
+  context-pack-path:
+    description: 'Absolute path to context-pack.json'
+  system-prompt-path:
+    description: 'Absolute path to system-prompt.md'
+  mcp-config-path:
+    description: 'Absolute path to .claude/gitnexus-mcp.json'
+  indexed-commit:
+    description: 'Commit SHA the PR-graph was indexed at. Empty when reindex was skipped (lazy path).'
 runs:
   using: 'node20'
   main: 'dist/index.js'
