@@ -1,0 +1,21 @@
+{
+  "prNumber": 999,
+  "prTitle": "chore: bump version",
+  "prAuthor": "octocat",
+  "prBranch": "chore/bump",
+  "prStatus": "open",
+  "blastLevel": "LOW",
+  "changedSymbols": [],
+  "d1Symbols": [],
+  "d2Symbols": [],
+  "d3Symbols": [],
+  "affectedFlows": [],
+  "affectedModules": [],
+  "changedFiles": [],
+  "fileRiskLevel": "LOW",
+  "riskFiles": [],
+  "graphData": { "nodes": [], "links": [] },
+  "truncated": false,
+  "stale": false,
+  "computedAt": "2026-05-17T18:07:45.285Z"
+}

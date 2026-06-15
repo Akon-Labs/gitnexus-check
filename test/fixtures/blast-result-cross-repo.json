@@ -1,0 +1,76 @@
+{
+  "prNumber": 207,
+  "prTitle": "feat(hub): cross-repo blast envelope",
+  "prAuthor": "abhigyanpatwari",
+  "prBranch": "claude/cross-repo-v2",
+  "prStatus": "open",
+  "blastLevel": "MEDIUM",
+  "changedSymbols": [
+    {
+      "id": "Function:gitnexus-hub/src/services/blast-radius/cross-repo.ts:computeCrossRepoImpact",
+      "name": "computeCrossRepoImpact",
+      "type": "Function",
+      "endLine": 171,
+      "filePath": "gitnexus-hub/src/services/blast-radius/cross-repo.ts",
+      "startLine": 163
+    }
+  ],
+  "d1Symbols": [],
+  "d2Symbols": [],
+  "d3Symbols": [],
+  "affectedFlows": [],
+  "affectedModules": [
+    {
+      "hits": 1,
+      "name": "Blast Radius",
+      "direct": true
+    }
+  ],
+  "changedFiles": [
+    {
+      "path": "gitnexus-hub/src/services/blast-radius/cross-repo.ts",
+      "status": "modified"
+    }
+  ],
+  "fileRiskLevel": "MEDIUM",
+  "riskFiles": [],
+  "graphData": {
+    "links": [],
+    "nodes": []
+  },
+  "crossRepo": {
+    "schemaVersion": "1",
+    "findings": [
+      {
+        "kind": "symbol",
+        "consumerRepo": "acme/widget-web",
+        "consumerSymbol": {
+          "name": "fetchBlast",
+          "filePath": "src/api/blast.ts"
+        },
+        "providerSymbol": {
+          "name": "computeCrossRepoImpact",
+          "filePath": "gitnexus-hub/src/services/blast-radius/cross-repo.ts",
+          "symbolLabel": "Function"
+        },
+        "via": "imports computeCrossRepoImpact",
+        "edgeType": "IMPORTS",
+        "detectionTier": "static",
+        "confidence": 0.92
+      }
+    ],
+    "groups": [
+      {
+        "id": "grp-001",
+        "name": "Acme Platform",
+        "lastAnalyzedAt": "2026-05-16T09:00:00.000Z",
+        "stale": false
+      }
+    ],
+    "truncated": false,
+    "error": null
+  },
+  "truncated": false,
+  "stale": false,
+  "computedAt": "2026-05-17T18:27:42.511Z"
+}

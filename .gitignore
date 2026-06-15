@@ -2,7 +2,16 @@ node_modules/
 lib/
 *.log
 .vitest/
+.env
+arch/
+.claude/
 
 # Allow committing the ncc-built action bundle (root .gitignore excludes dist/).
 !dist/
 !dist/**
+.gitnexus
+
+
+/test/results/pr-flow/
+/scripts/render-live.ts
+/scripts/render-fixture.ts
