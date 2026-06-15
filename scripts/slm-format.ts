@@ -25,7 +25,7 @@ import OpenAI from 'openai';
 
 // ── Azure AI deployment (OpenAI-compatible v1 endpoint) ──────────────────────
 export const AZURE_ENDPOINT = 'https://akonlabs.services.ai.azure.com/openai/v1';
-export const AZURE_DEPLOYMENT = 'gpt-5.4-nano';
+export const AZURE_DEPLOYMENT = 'DeepSeek-V4-Flash';
 
 /**
  * @brief: Instruction for the digest pass. The model produces ONLY the summary
@@ -61,11 +61,12 @@ export const SLM_SYSTEM_PROMPT = [
 ].join('\n');
 
 /**
- * @brief: Ask the Azure-hosted SLM for the summary digest. Uses the Responses
- *         API (the path gpt-5 reasoning models expect). No temperature — gpt-5
- *         nano rejects non-default sampling. Returns the digest markdown, or
- *         throws on any API failure (the caller decides whether to fall back to
- *         the raw deterministic comment).
+ * @brief: Ask the Azure-hosted SLM for the summary digest. Uses the Chat
+ *         Completions API (DeepSeek is a chat model, not a gpt-5 reasoning
+ *         model): the editor instruction is the system message, the report is
+ *         the user message. Low temperature keeps it faithful. Returns the
+ *         digest markdown, or throws on any API failure (the caller decides
+ *         whether to fall back to the raw deterministic comment).
  *
  * @params: (markdown: string) -> Deterministic comment from renderComment.
  * @params: (apiKey: string)   -> Azure AI API key (from .env). Never logged.
@@ -75,12 +76,18 @@ export async function summarizeWithSlm(markdown: string, apiKey: string): Promis
   // maxRetries lets the SDK back off and honor Retry-After on 429s, which this
   // shared deployment returns under load; the timeout caps a single attempt.
   const client = new OpenAI({ baseURL: AZURE_ENDPOINT, apiKey, maxRetries: 5, timeout: 60_000 });
-  const completion = await client.responses.create({
+  const completion = await client.chat.completions.create({
     model: AZURE_DEPLOYMENT,
-    instructions: SLM_SYSTEM_PROMPT,
-    input: `Write the executive summary for this PR review comment, following every rule above:\n\n${markdown}`,
+    temperature: 0.2,
+    messages: [
+      { role: 'system', content: SLM_SYSTEM_PROMPT },
+      {
+        role: 'user',
+        content: `Write the executive summary for this PR review comment, following every rule above:\n\n${markdown}`,
+      },
+    ],
   });
-  const out = completion.output_text?.trim();
+  const out = completion.choices[0]?.message?.content?.trim();
   if (!out) throw new Error('SLM returned an empty completion');
   return out;
 }
