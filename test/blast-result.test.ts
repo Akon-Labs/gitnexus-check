@@ -142,6 +142,19 @@ describe('isBlastResult', () => {
       }),
     ).toBe(false);
   });
+
+  it('accepts aiSummary as a string, null, or absent', () => {
+    const base = { blastLevel: 'LOW', truncated: false, computedAt: 'x' };
+    expect(isBlastResult({ ...base, aiSummary: '## Summary\nok' })).toBe(true);
+    expect(isBlastResult({ ...base, aiSummary: null })).toBe(true);
+    expect(isBlastResult(base)).toBe(true);
+  });
+
+  it('rejects when aiSummary is present as a non-string', () => {
+    expect(
+      isBlastResult({ blastLevel: 'LOW', truncated: false, computedAt: 'x', aiSummary: 123 }),
+    ).toBe(false);
+  });
 });
 
 describe('normalizeBlastResult', () => {
@@ -215,6 +228,19 @@ describe('normalizeBlastResult', () => {
     expect(finding.consumerRepo).toBe('acme/widget-web');
     const [group] = out.crossRepo?.groups as Array<{ name: string }>;
     expect(group.name).toBe('Acme Platform');
+  });
+
+  it('passes through a string aiSummary and defaults missing/non-string to null', () => {
+    const base = {
+      blastLevel: 'LOW',
+      truncated: false,
+      computedAt: 'x',
+    } as unknown as BlastResult;
+    expect(normalizeBlastResult({ ...base, aiSummary: '## Summary' }).aiSummary).toBe('## Summary');
+    expect(normalizeBlastResult(base).aiSummary).toBeNull();
+    expect(
+      normalizeBlastResult({ ...base, aiSummary: 123 as unknown as string }).aiSummary,
+    ).toBeNull();
   });
 
   it('fills a missing crossRepo with the EMPTY_CROSS_REPO zero-state', () => {

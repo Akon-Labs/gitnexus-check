@@ -34798,6 +34798,7 @@ const hub_client_1 = __nccwpck_require__(4162);
 const render_comment_1 = __nccwpck_require__(7323);
 const post_comment_1 = __nccwpck_require__(1229);
 const gate_1 = __nccwpck_require__(1956);
+const slm_format_1 = __nccwpck_require__(8449);
 /**
  * @brief: Top-level orchestration. Sequence:
  *           1. Read inputs + validate event shape (non-PR → warn + exit 0).
@@ -34806,6 +34807,8 @@ const gate_1 = __nccwpck_require__(1956);
  *           4. refreshBlast   → POST /refresh (synchronous on the live Hub).
  *           5. getBlast       → GET /prs/:n; validated by isBlastResult.
  *           6. renderComment  → markdown ≤ CHAR_BUDGET.
+ *           6b. aiSummary     → if the Hub returned a digest, splice it on top
+ *                               and collapse detail; else post (6) unchanged.
  *           7. postOrUpdate   → Octokit upsert by marker.
  *           8. setOutput      → comment-id, blast-level, gate-decision.
  *           9. evaluateGate   → setFailed iff blast level meets/exceeds threshold.
@@ -34867,7 +34870,14 @@ async function main() {
     catch (err) {
         return fail(err, 'hub', 'getBlast');
     }
-    const body = (0, render_comment_1.renderComment)(blast, { prNumber, hubUrl });
+    const rawBody = (0, render_comment_1.renderComment)(blast, { prNumber, hubUrl });
+    // ── 6b. If the Hub produced an LLM summary digest (it holds the Azure key
+    //        and rate-limits the call), splice it to the top and collapse the
+    //        detail beneath it. Absent/empty → post the deterministic comment
+    //        unchanged. The Action makes no LLM call of its own.
+    const body = typeof blast.aiSummary === 'string' && blast.aiSummary.trim().length > 0
+        ? (0, slm_format_1.composeWithDigest)(rawBody, blast.aiSummary)
+        : rawBody;
     let posted;
     try {
         const octokit = github.getOctokit(githubToken);
@@ -35067,7 +35077,7 @@ function asIssueCommentsClient(octokit) {
  *         normalised BlastResult (post-isBlastResult, post-normalize) and
  *         emits a single string under CHAR_BUDGET. Performs progressive
  *         truncation when over budget per v1-integration-plan.md §8. No
- *         I/O, no `core.*`, no axios — this module is deterministic and
+ *         I/O, no `core.*`, no axios - this module is deterministic and
  *         fully fixture-testable.
  */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
@@ -35101,6 +35111,22 @@ const TOP_N_SYMBOL_ROWS = 50;
 const TOP_N_RISK_FILES = 20;
 const TOP_N_FLOW_ROWS = 20;
 const TOP_N_FILE_ROWS = 20;
+/** Max cross-repo findings rendered before a "(N more)" trailer. */
+const TOP_N_CROSS_REPO = 15;
+/** Per-consumer-repo finding cap applied at the `capped` truncation level. */
+const CROSS_REPO_CAPPED_PER_REPO = 3;
+/**
+ * Display channels for cross-repo findings, in render order. Each finding is
+ * sorted into one of these so a consumer repo's dependencies read as a few
+ * labelled groups instead of a flat list of near-identical bullets.
+ */
+const CROSS_REPO_CHANNEL_ORDER = [
+    'Imported symbols',
+    'HTTP routes',
+    'Messaging topics',
+    'Contracts',
+    'Shared flows',
+];
 /**
  * @brief: Render a BlastResult into the v1 comment markdown. Always starts
  *         with COMMENT_MARKER. Sections are emitted only when their
@@ -35114,7 +35140,7 @@ const TOP_N_FILE_ROWS = 20;
  * @params: (opts.prNumber: number) -> GitHub PR number for the heading.
  * @params: (opts.hubUrl: string)   -> Hub base URL, used in the footer link.
  *
- * @returns: string — markdown body ≤ CHAR_BUDGET.
+ * @returns: string - markdown body ≤ CHAR_BUDGET.
  */
 function renderComment(blast, opts) {
     // Render every variant once, then pick the smallest that fits.
@@ -35131,11 +35157,11 @@ function renderComment(blast, opts) {
         if (body.length <= exports.CHAR_BUDGET)
             return body;
     }
-    // Even the headline variant blew the budget — clamp hard.
+    // Even the headline variant blew the budget - clamp hard.
     return variants[variants.length - 1]().slice(0, exports.CHAR_BUDGET);
 }
 /**
- * @brief: Build the comment body at a given detail level. Internal — the
+ * @brief: Build the comment body at a given detail level. Internal - the
  *         exported renderComment iterates this with progressively lower
  *         detail until the result fits CHAR_BUDGET.
  */
@@ -35184,7 +35210,7 @@ function buildBody(blast, opts, cfg) {
  * @brief: Centered header block with the review title.
  *
  * @params: (prNumber: number) -> GitHub PR number for the title.
- * @returns: string — an HTML-centered markdown block.
+ * @returns: string - an HTML-centered markdown block.
  */
 function renderHeader(prNumber) {
     return [
@@ -35198,12 +35224,12 @@ function renderHeader(prNumber) {
     ].join('\n');
 }
 /**
- * @brief: At-a-glance metrics strip rendered just under the verdict — a
+ * @brief: At-a-glance metrics strip rendered just under the verdict - a
  *         one-row table of the headline numbers (level, dependents,
  *         modules, flows, files) so a reviewer can scan impact instantly.
  *
  * @params: (blast: BlastResult) -> Normalised Hub result.
- * @returns: string — a single-row markdown table.
+ * @returns: string - a single-row markdown table.
  */
 function renderSummaryStrip(blast) {
     const deps = blast.d1Symbols.length + blast.d2Symbols.length + blast.d3Symbols.length;
@@ -35215,7 +35241,7 @@ function renderSummaryStrip(blast) {
 }
 /**
  * @brief: Render the signal sections grouped into three reviewer-intent
- *         buckets — "What changed" (the PR's own edits), "What it affects"
+ *         buckets - "What changed" (the PR's own edits), "What it affects"
  *         (downstream impact), and "What to check" (risk/follow-ups). Each
  *         bucket header is emitted only when it has at least one section.
  *         Long lists (Symbol Changes, Changed Files, Affected Flows, File
@@ -35251,6 +35277,19 @@ function appendSections(parts, blast, detail) {
             affects.push(renderApiSurfaceDelta(surface));
     }
     rendered = appendBucket(parts, 'What it affects', affects) || rendered;
+    // ── Cross-repo impact: reach into the org's other repos ──
+    // Renders when there are findings OR an error (silence reads as "no impact",
+    // so a failed bridge join must still be visible). Dropped at minimal /
+    // headline-only; per-repo capped at `capped`. Cross-repo outranks d2/d3
+    // transitive detail but never the headline.
+    if (detail !== 'minimal') {
+        const cr = blast.crossRepo;
+        if (cr && (cr.findings.length > 0 || cr.error !== null)) {
+            const section = renderCrossRepo(cr, detail);
+            if (section)
+                rendered = appendBucket(parts, 'Cross-Repo Impact', [section]) || rendered;
+        }
+    }
     // ── What to check: risk / follow-ups ──
     const check = [];
     if (detail === 'full' && blast.riskFiles.length > 0) {
@@ -35276,7 +35315,169 @@ function appendBucket(parts, title, sections) {
     return true;
 }
 /**
- * @brief: The Verdict — a deterministic single-line ruling for the
+ * @brief: Render the Cross-Repo Impact bucket body. Opens with one plain-English
+ *         sentence explaining what cross-repo impact means, then a subsection per
+ *         consumer repo whose findings are grouped into labelled channels (HTTP
+ *         routes, messaging topics, imported symbols, …) so the section reads as
+ *         a scannable map rather than a flat dump. Closes with freshness /
+ *         degraded notes. Hub order is preserved (the Hub confidence-sorts; the
+ *         Action never re-sorts). All interpolated Hub strings pass through
+ *         escapeCell. Returns '' if nothing renders.
+ *
+ * @params: (cr: CrossRepoResult) -> The normalised cross-repo envelope.
+ * @params: (detail: DetailLevel) -> Drives the per-repo cap at `capped`.
+ */
+function renderCrossRepo(cr, detail) {
+    // Group by consumer repo, preserving Hub order, capped at TOP_N_CROSS_REPO.
+    const order = [];
+    const byRepo = new Map();
+    let shown = 0;
+    for (const f of cr.findings) {
+        if (shown >= TOP_N_CROSS_REPO)
+            break;
+        // Flow findings carry consumerRepo '' (they span repos); bucket them under
+        // a named header so they don't collapse into a blank-named group.
+        const key = f.consumerRepo && f.consumerRepo.length > 0 ? f.consumerRepo : 'Shared cross-repo flows';
+        const existing = byRepo.get(key);
+        if (existing) {
+            existing.push(f);
+        }
+        else {
+            byRepo.set(key, [f]);
+            order.push(key);
+        }
+        shown++;
+    }
+    const perRepoCap = detail === 'capped' ? CROSS_REPO_CAPPED_PER_REPO : Number.POSITIVE_INFINITY;
+    const lines = [];
+    // One plain sentence so a reviewer knows what this section means, then a
+    // collapsed block per consumer repo so the comment stays short by default.
+    lines.push('> Repos in your group that depend on code this PR changes. Expand each to see what it relies on, and review before merging.');
+    lines.push('');
+    for (const repo of order) {
+        const findings = byRepo.get(repo) ?? [];
+        const visible = findings.slice(0, perRepoCap);
+        const noun = findings.length === 1 ? 'interface' : 'interfaces';
+        const channelLines = renderConsumerChannels(visible);
+        const hidden = findings.length - visible.length;
+        if (hidden > 0)
+            channelLines.push(`_…and ${hidden} more in this repo._`);
+        const inner = channelLines.join('\n').trimEnd();
+        lines.push(detailsBlock(`${escapeCell(repo)} · ${findings.length} ${noun}`, inner));
+        lines.push('');
+    }
+    const remaining = cr.findings.length - shown;
+    if (remaining > 0) {
+        lines.push(`_${remaining} further cross-repo finding${remaining === 1 ? '' : 's'} not shown._`);
+        lines.push('');
+    }
+    const staleDate = oldestStaleDate(cr.groups);
+    if (staleDate) {
+        lines.push(`_Based on a cross-repo analysis from ${staleDate}. Re-analyze the group for up-to-date results._`);
+    }
+    // Privacy: never echo the raw Hub error (it can carry a group name, §5.2).
+    if (cr.error !== null) {
+        lines.push('_Cross-repo analysis was incomplete, so some dependents may be missing._');
+    }
+    return lines.join('\n').trimEnd();
+}
+/**
+ * @brief: Group a consumer repo's findings into labelled channels (HTTP routes,
+ *         messaging topics, imported symbols, …) and render each as a compact
+ *         block: a single comma-separated line for interface-style channels, a
+ *         short bullet list for the symbol/flow channels that carry a location.
+ *         This turns a flat dump of near-identical bullets into a scannable map
+ *         of "what kind of thing, and how many".
+ */
+function renderConsumerChannels(findings) {
+    const inlineItems = new Map();
+    const bulletItems = new Map();
+    for (const f of findings) {
+        const c = categorizeFinding(f);
+        if (!c)
+            continue;
+        const bucket = c.style === 'inline' ? inlineItems : bulletItems;
+        const list = bucket.get(c.channel);
+        if (list)
+            list.push(c.display);
+        else
+            bucket.set(c.channel, [c.display]);
+    }
+    const out = [];
+    for (const channel of CROSS_REPO_CHANNEL_ORDER) {
+        const inline = inlineItems.get(channel);
+        if (inline && inline.length > 0) {
+            out.push(`**${channel}** (${inline.length}): ${inline.join(', ')}`);
+            out.push('');
+            continue;
+        }
+        const bullets = bulletItems.get(channel);
+        if (bullets && bullets.length > 0) {
+            out.push(`**${channel}** (${bullets.length}):`);
+            for (const b of bullets)
+                out.push(`- ${b}`);
+            out.push('');
+        }
+    }
+    return out;
+}
+/**
+ * @brief: Sort one finding into a display channel. Discriminated-union switch on
+ *         `kind` with a default of `null` (skip), so an unknown future kind (the
+ *         reserved 'breakage') is ignored rather than mis-rendered. Contract
+ *         `via` values carry a `http:` / `messaging:` prefix that names the
+ *         channel, so we strip it from the display once the channel is set.
+ *         Every interpolated value is escaped for a markdown table/code cell.
+ */
+function categorizeFinding(f) {
+    switch (f.kind) {
+        case 'symbol': {
+            const display = f.consumerSymbol
+                ? `\`${escapeCell(f.consumerSymbol.name)}\` (used in \`${escapeCell(f.consumerSymbol.filePath)}\`)`
+                : `\`${escapeCell(f.via)}\``;
+            return { channel: 'Imported symbols', display, style: 'bullet' };
+        }
+        case 'contract': {
+            if (f.via.startsWith('http:')) {
+                return { channel: 'HTTP routes', display: `\`${escapeCell(f.via.slice(5))}\``, style: 'inline' };
+            }
+            if (f.via.startsWith('messaging:')) {
+                return { channel: 'Messaging topics', display: `\`${escapeCell(f.via.slice(10))}\``, style: 'inline' };
+            }
+            return { channel: 'Contracts', display: `\`${escapeCell(f.via)}\``, style: 'inline' };
+        }
+        case 'flow':
+            return {
+                channel: 'Shared flows',
+                display: `\`${escapeCell(f.flow.label)}\` (step ${f.flow.step} of ${f.flow.stepCount})`,
+                style: 'bullet',
+            };
+        default:
+            return null;
+    }
+}
+/** Distinct, non-empty consumer repos in Hub-emit order (for the verdict clause). */
+function distinctConsumerRepos(findings) {
+    const seen = new Set();
+    const out = [];
+    for (const f of findings) {
+        if (f.consumerRepo && !seen.has(f.consumerRepo)) {
+            seen.add(f.consumerRepo);
+            out.push(f.consumerRepo);
+        }
+    }
+    return out;
+}
+/** Oldest `lastAnalyzedAt` among stale groups as YYYY-MM-DD, or null if none stale. */
+function oldestStaleDate(groups) {
+    const dates = groups
+        .filter((g) => g.stale && typeof g.lastAnalyzedAt === 'string')
+        .map((g) => g.lastAnalyzedAt)
+        .sort();
+    return dates.length > 0 ? dates[0].slice(0, 10) : null;
+}
+/**
+ * @brief: The Verdict - a deterministic single-line ruling for the
  *         blockquote at the top, derived solely from already-validated
  *         numeric/enum fields (never untrusted PR title/branch strings).
  *         Combines the blast-level ruling, total dependent count, module
@@ -35287,7 +35488,7 @@ function appendBucket(parts, title, sections) {
  *
  * @params: (blast: BlastResult) -> Normalised Hub result.
  *
- * @returns: string — the one-line verdict, or '' when empty.
+ * @returns: string - the one-line verdict, or '' when empty.
  */
 function buildHeadline(blast) {
     const bits = [];
@@ -35305,8 +35506,25 @@ function buildHeadline(blast) {
     const rationale = levelRationale(blast.blastLevel);
     if (rationale)
         bits.push(rationale);
+    // Cross-repo verdict clause: "affects N other repos (a, b, c +K more)".
+    const cr = blast.crossRepo;
+    if (cr && cr.findings.length > 0) {
+        const repos = distinctConsumerRepos(cr.findings);
+        if (repos.length > 0) {
+            const head = repos.slice(0, 3).map(escapeCell).join(', ');
+            const extra = repos.length > 3 ? ` +${repos.length - 3} more` : '';
+            bits.push(`affects ${repos.length} other repo${repos.length === 1 ? '' : 's'} (${head}${extra})`);
+        }
+    }
     if (blast.stale)
         bits.push('_(stale, re-run for fresh analysis)_');
+    // Distinct cross-repo caveats (error and stale are different states).
+    if (cr && cr.error !== null) {
+        bits.push('_(cross-repo analysis unavailable)_');
+    }
+    else if (cr && cr.groups.some((g) => g.stale)) {
+        bits.push('_(cross-repo data may be stale)_');
+    }
     return bits.join(' · ');
 }
 /**
@@ -35397,7 +35615,7 @@ function renderArchitectureImpact(modules, detail) {
  *         back to '(unnamed flow)'; every Hub string is run through
  *         escapeCell (§6.1). Rows are capped at TOP_N_FLOW_ROWS at the
  *         capped detail level with a `_(N more)_` trailer. No section
- *         header — the caller wraps it in a collapsible block.
+ *         header - the caller wraps it in a collapsible block.
  */
 function renderAffectedFlows(flows, detail) {
     const cap = detail === 'capped' ? TOP_N_FLOW_ROWS : flows.length;
@@ -35487,7 +35705,7 @@ function appendDetails(rows, summary, symbols) {
 }
 /**
  * @brief: Render the Symbol Changes table (`| Kind | Symbol | Location |`).
- *         No section header — the caller wraps it in a collapsible block
+ *         No section header - the caller wraps it in a collapsible block
  *         whose summary carries the count. Capped per detail level.
  */
 function renderSymbolChanges(symbols, detail) {
@@ -35527,7 +35745,7 @@ function renderApiSurfaceDelta(symbols) {
     return rows.join('\n');
 }
 /**
- * @brief: Render the File Risk table. No section header — the caller wraps
+ * @brief: Render the File Risk table. No section header - the caller wraps
  *         it in a collapsible block. Risk and status render as
  *         emoji-prefixed badges; all Hub strings pass through escapeCell.
  */
@@ -35556,7 +35774,7 @@ function renderRiskFiles(riskFiles) {
  *         is nothing to recommend.
  *
  * @params: (blast: BlastResult) -> Normalised Hub result.
- * @returns: string — the markdown section, or '' when not applicable.
+ * @returns: string - the markdown section, or '' when not applicable.
  */
 function renderRecommendations(blast) {
     if (blast.blastLevel === 'LOW')
@@ -35625,7 +35843,7 @@ function formatLocation(symbol) {
  * @brief: Defensively escape characters that would break a markdown table
  *         cell or inline code span. The Hub-supplied strings (file paths,
  *         symbol names, module names) are untrusted-input-ish in the
- *         security-model sense — they come from the user's own repo but
+ *         security-model sense - they come from the user's own repo but
  *         flow through our renderer; we treat them conservatively.
  *
  *         Backticks are replaced (not backslash-escaped) because GFM code
@@ -35633,6 +35851,74 @@ function formatLocation(symbol) {
  */
 function escapeCell(value) {
     return value.replace(/\|/g, '\\|').replace(/`/g, "'").replace(/\r?\n/g, ' ');
+}
+
+
+/***/ }),
+
+/***/ 8449:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * @brief: Compose the Hub-provided `aiSummary` digest into the deterministic
+ *         PR comment. The LLM call itself lives on the GitNexus Hub (which
+ *         holds the Azure credential and rate-limits the call) — the Action no
+ *         longer talks to Azure. The Hub returns a ready-made `## Summary`
+ *         block on the BlastResult; this module just splices it in and collapses
+ *         the heavy detail beneath it so a huge PR doesn't flood the thread.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.composeWithDigest = composeWithDigest;
+/**
+ * @brief: Splice the Hub's summary digest into the deterministic comment and
+ *         collapse the heavy detail beneath it. The default-visible comment
+ *         becomes just the header, one-line verdict, metrics strip, and the
+ *         readable `## Summary` digest — so a 160-symbol / 100-file PR no longer
+ *         floods the thread. Every detail table is kept verbatim from the
+ *         renderer but tucked inside ONE collapsed `<details>` expander, one
+ *         click away. Falls back to appending the digest if there is no detail
+ *         body (empty-blast comment).
+ *
+ * @params: (rawComment: string) -> Full deterministic comment from renderComment.
+ * @params: (digest: string)     -> The `## Summary` block from the Hub (aiSummary).
+ * @returns: string — the composed, concise comment.
+ */
+function composeWithDigest(rawComment, digest) {
+    const block = digest.trim();
+    const sep = '\n---\n';
+    const i = rawComment.indexOf(sep);
+    if (i === -1) {
+        // No section divider (empty-blast comment): nothing heavy to collapse.
+        return `${rawComment.trimEnd()}\n\n---\n\n${block}\n`;
+    }
+    // Split at the first divider: head = marker/header/verdict/metrics, rest =
+    // all the detail sections. Rebuild as head → Summary → one collapsed expander.
+    const head = rawComment.slice(0, i).trimEnd();
+    const rest = rawComment.slice(i + sep.length).trim();
+    const summary = buildDetailSummary(rawComment);
+    return (`${head}\n\n${block}\n\n---\n\n` +
+        `<details>\n<summary><b>${summary}</b></summary>\n\n${rest}\n\n</details>\n`);
+}
+/**
+ * @brief: Build the collapsed-expander summary line, e.g.
+ *         "📋 Full report — 162 symbols · 117 files · 58 flows", pulling the
+ *         counts straight from the renderer's own section headers so they stay
+ *         exact. Returns a bare label when no counts are found.
+ */
+function buildDetailSummary(rawComment) {
+    const sym = rawComment.match(/Symbol Changes \((\d+)\)/);
+    const files = rawComment.match(/Changed Files \((\d+)\)/);
+    const flows = rawComment.match(/Affected Flows \((\d+)\)/);
+    const parts = [];
+    if (sym)
+        parts.push(`${sym[1]} symbols`);
+    if (files)
+        parts.push(`${files[1]} files`);
+    if (flows)
+        parts.push(`${flows[1]} flows`);
+    return parts.length > 0 ? `📋 Full report — ${parts.join(' · ')}` : '📋 Full report';
 }
 
 
@@ -35754,6 +36040,14 @@ function isBlastResult(value) {
         if (groups !== null && groups !== undefined && !Array.isArray(groups))
             return false;
     }
+    // aiSummary arrived later too; older Hubs omit it. Accept absent/null;
+    // reject only a present non-string value.
+    if ('aiSummary' in value &&
+        value.aiSummary !== null &&
+        value.aiSummary !== undefined &&
+        typeof value.aiSummary !== 'string') {
+        return false;
+    }
     return true;
 }
 /**
@@ -35784,6 +36078,7 @@ function normalizeBlastResult(value) {
         riskFiles: value.riskFiles ?? [],
         graphData: value.graphData ?? { nodes: [], links: [] },
         crossRepo: normalizeCrossRepo(value.crossRepo),
+        aiSummary: typeof value.aiSummary === 'string' ? value.aiSummary : null,
         truncated: Boolean(value.truncated),
         stale: Boolean(value.stale),
         prTitle: value.prTitle ?? null,
@@ -35803,9 +36098,9 @@ function isObject(v) {
  *         object; otherwise fills each field with a type-checked default.
  *         `findings`/`groups` are passed through verbatim when they are arrays.
  *
- *         Intentionally NOT version-aware: `schemaVersion` is preserved as-is
- *         (defaulting to '1' only when non-string). "Degrade on unknown
- *         version" logic is deferred to the renderer PR.
+ *         Version-aware: a `schemaVersion` other than '1' degrades to an error
+ *         envelope (empty findings + an `error`) rather than mis-rendering data
+ *         whose semantics may have changed — the schemaVersion exists for this.
  *
  * @params: (v: unknown) -> The `crossRepo` field off a Hub response body.
  *
@@ -35814,8 +36109,22 @@ function isObject(v) {
 function normalizeCrossRepo(v) {
     if (!isObject(v))
         return exports.EMPTY_CROSS_REPO;
+    const sv = typeof v.schemaVersion === 'string' ? v.schemaVersion : undefined;
+    if (sv !== undefined && sv !== '1') {
+        return {
+            schemaVersion: '1',
+            findings: [],
+            groups: [],
+            truncated: false,
+            error: `unsupported crossRepo schema version: ${sv}`,
+        };
+    }
+    // Shallow trust-boundary validation: confirm arrays, then cast. The renderer
+    // switches on `kind` with a default no-op, so malformed members render as
+    // nothing rather than throwing — deep per-finding validation would reject
+    // valid responses from a Hub that adds fields.
     return {
-        schemaVersion: typeof v.schemaVersion === 'string' ? v.schemaVersion : '1',
+        schemaVersion: '1',
         findings: Array.isArray(v.findings) ? v.findings : [],
         groups: Array.isArray(v.groups) ? v.groups : [],
         truncated: Boolean(v.truncated),
