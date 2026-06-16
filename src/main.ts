@@ -19,6 +19,7 @@ import {
 import { renderComment, COMMENT_MARKER } from './render-comment';
 import { asIssueCommentsClient, postOrUpdateComment } from './post-comment';
 import { parseThreshold, evaluateGate } from './gate';
+import { composeWithDigest } from './slm-format';
 
 /**
  * @brief: Top-level orchestration. Sequence:
@@ -28,6 +29,8 @@ import { parseThreshold, evaluateGate } from './gate';
  *           4. refreshBlast   → POST /refresh (synchronous on the live Hub).
  *           5. getBlast       → GET /prs/:n; validated by isBlastResult.
  *           6. renderComment  → markdown ≤ CHAR_BUDGET.
+ *           6b. aiSummary     → if the Hub returned a digest, splice it on top
+ *                               and collapse detail; else post (6) unchanged.
  *           7. postOrUpdate   → Octokit upsert by marker.
  *           8. setOutput      → comment-id, blast-level, gate-decision.
  *           9. evaluateGate   → setFailed iff blast level meets/exceeds threshold.
@@ -92,7 +95,16 @@ export async function main(): Promise<void> {
     return fail(err, 'hub', 'getBlast');
   }
 
-  const body = renderComment(blast, { prNumber, hubUrl });
+  const rawBody = renderComment(blast, { prNumber, hubUrl });
+
+  // ── 6b. If the Hub produced an LLM summary digest (it holds the Azure key
+  //        and rate-limits the call), splice it to the top and collapse the
+  //        detail beneath it. Absent/empty → post the deterministic comment
+  //        unchanged. The Action makes no LLM call of its own.
+  const body =
+    typeof blast.aiSummary === 'string' && blast.aiSummary.trim().length > 0
+      ? composeWithDigest(rawBody, blast.aiSummary)
+      : rawBody;
 
   let posted;
   try {

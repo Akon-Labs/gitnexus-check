@@ -143,6 +143,42 @@ describe('main — happy path', () => {
     expect(outputs['blast-level']).toBe('LOW');
     expect(setFailedSpy).not.toHaveBeenCalled();
   });
+
+  it('splices the Hub aiSummary into the posted body when present', async () => {
+    resolveSpy.mockResolvedValue('repo-uuid');
+    refreshSpy.mockResolvedValue(undefined);
+    const blastRaw = loadFullBlast() as Record<string, unknown>;
+    const { isBlastResult, normalizeBlastResult } = await import('../src/types/blast-result');
+    if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
+    const blast = normalizeBlastResult(blastRaw);
+    blast.aiSummary = '## Summary\n\n🟢 LOW — nothing scary here.';
+    getBlastSpy.mockResolvedValue(blast);
+    postSpy.mockResolvedValue({ commentId: 1, action: 'created' });
+
+    const { main } = await import('../src/main');
+    await main();
+
+    const body = (postSpy.mock.calls[0][0] as { body: string }).body;
+    expect(body).toContain('## Summary');
+    expect(body).toContain('🟢 LOW — nothing scary here.');
+  });
+
+  it('posts the deterministic body unchanged when aiSummary is absent', async () => {
+    resolveSpy.mockResolvedValue('repo-uuid');
+    refreshSpy.mockResolvedValue(undefined);
+    const blastRaw = loadFullBlast();
+    const { isBlastResult, normalizeBlastResult } = await import('../src/types/blast-result');
+    if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
+    getBlastSpy.mockResolvedValue(normalizeBlastResult(blastRaw)); // no aiSummary
+    postSpy.mockResolvedValue({ commentId: 1, action: 'created' });
+
+    const { main } = await import('../src/main');
+    await main();
+
+    const body = (postSpy.mock.calls[0][0] as { body: string }).body;
+    expect(body).not.toContain('## Summary');
+    expect(body).not.toContain('📋 Full report');
+  });
 });
 
 describe('main — non-PR event', () => {

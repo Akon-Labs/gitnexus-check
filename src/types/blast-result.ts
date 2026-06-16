@@ -230,6 +230,11 @@ export interface BlastResult {
   // object literals straight into normalizeBlastResult(value: BlastResult);
   // a required field would break those ~10 literals at compile time.
   crossRepo?: CrossRepoResult;
+
+  // LLM "## Summary" digest produced by the Hub (Hub holds the Azure key and
+  // rate-limits the call). Absent/null on older Hubs or when the Hub skipped
+  // it — the Action then posts the deterministic comment unchanged.
+  aiSummary?: string | null;
 }
 
 /**
@@ -304,6 +309,17 @@ export function isBlastResult(value: unknown): value is BlastResult {
     if (groups !== null && groups !== undefined && !Array.isArray(groups)) return false;
   }
 
+  // aiSummary arrived later too; older Hubs omit it. Accept absent/null;
+  // reject only a present non-string value.
+  if (
+    'aiSummary' in value &&
+    value.aiSummary !== null &&
+    value.aiSummary !== undefined &&
+    typeof value.aiSummary !== 'string'
+  ) {
+    return false;
+  }
+
   return true;
 }
 
@@ -335,6 +351,7 @@ export function normalizeBlastResult(value: BlastResult): BlastResult {
     riskFiles: value.riskFiles ?? [],
     graphData: value.graphData ?? { nodes: [], links: [] },
     crossRepo: normalizeCrossRepo(value.crossRepo),
+    aiSummary: typeof value.aiSummary === 'string' ? value.aiSummary : null,
     truncated: Boolean(value.truncated),
     stale: Boolean(value.stale),
     prTitle: value.prTitle ?? null,
