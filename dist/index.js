@@ -34580,6 +34580,8 @@ const classify_error_1 = __nccwpck_require__(6042);
 exports.ACTION_DEVICE_FINGERPRINT = 'gitnexus-check-action';
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024; // 5MB hard cap on JSON body
+/** SHA shape guard — 7..40 hex. A present-but-malformed headSha throws (loud). */
+const SHA_RE = /^[0-9a-f]{7,40}$/i;
 /**
  * @brief: Validate a URL string at the trust boundary. Rejects anything
  *         not `https://` and strips at most one trailing slash so the
@@ -34639,9 +34641,11 @@ async function resolveRepoId(opts) {
  * @params: (opts.token: string)    -> gnx_ device Bearer token.
  * @params: (opts.repoId: string)   -> Hub repo UUID from resolveRepoId.
  * @params: (opts.prNumber: number) -> GitHub PR number to refresh.
+ * @params: (opts.headSha?: string) -> Optional PR head sha (review anchor); a
+ *   present-but-malformed value throws, absent omits the ?headSha= query string.
  *
  * @returns: void
- * @call-routes: POST /api/repos/:repoId/prs/:prNumber/refresh
+ * @call-routes: POST /api/repos/:repoId/prs/:prNumber/refresh (optional ?headSha=<sha>)
  */
 async function refreshBlast(opts) {
     if (!/^[A-Za-z0-9-]+$/.test(opts.repoId)) {
@@ -34650,8 +34654,12 @@ async function refreshBlast(opts) {
     if (!Number.isInteger(opts.prNumber) || opts.prNumber <= 0) {
         throw new Error(`invalid prNumber: ${String(opts.prNumber)}`);
     }
+    if (opts.headSha !== undefined && !SHA_RE.test(opts.headSha)) {
+        throw new Error('invalid headSha shape');
+    }
     await axios_1.default.post(`${opts.hubUrl}/api/repos/${opts.repoId}/prs/${opts.prNumber}/refresh`, {}, {
         headers: hubHeaders(opts.token),
+        params: opts.headSha ? { headSha: opts.headSha } : undefined,
         timeout: 5 * 60_000, // /refresh may run a full graph walk; allow 5min
         maxContentLength: MAX_RESPONSE_BYTES,
         maxBodyLength: MAX_RESPONSE_BYTES,
@@ -34669,10 +34677,12 @@ async function refreshBlast(opts) {
  * @params: (opts.token: string)    -> gnx_ device Bearer token.
  * @params: (opts.repoId: string)   -> Hub repo UUID.
  * @params: (opts.prNumber: number) -> GitHub PR number.
+ * @params: (opts.headSha?: string) -> Optional PR head sha (review anchor); a
+ *   present-but-malformed value throws, absent omits the ?headSha= query string.
  *
  * @returns: BlastResult — normalised; all arrays guaranteed present.
  * @throws: SchemaMismatchError when the body fails isBlastResult validation.
- * @call-routes: GET /api/repos/:repoId/prs/:prNumber
+ * @call-routes: GET /api/repos/:repoId/prs/:prNumber (optional ?headSha=<sha>)
  */
 async function getBlast(opts) {
     if (!/^[A-Za-z0-9-]+$/.test(opts.repoId)) {
@@ -34681,8 +34691,12 @@ async function getBlast(opts) {
     if (!Number.isInteger(opts.prNumber) || opts.prNumber <= 0) {
         throw new Error(`invalid prNumber: ${String(opts.prNumber)}`);
     }
+    if (opts.headSha !== undefined && !SHA_RE.test(opts.headSha)) {
+        throw new Error('invalid headSha shape');
+    }
     const res = await axios_1.default.get(`${opts.hubUrl}/api/repos/${opts.repoId}/prs/${opts.prNumber}`, {
         headers: hubHeaders(opts.token),
+        params: opts.headSha ? { headSha: opts.headSha } : undefined,
         timeout: DEFAULT_TIMEOUT_MS,
         maxContentLength: MAX_RESPONSE_BYTES,
         maxBodyLength: MAX_RESPONSE_BYTES,
@@ -34809,7 +34823,9 @@ const slm_format_1 = __nccwpck_require__(8449);
  *           6. renderComment  → markdown ≤ CHAR_BUDGET.
  *           6b. aiSummary     → if the Hub returned a digest, splice it on top
  *                               and collapse detail; else post (6) unchanged.
- *           7. postOrUpdate   → Octokit upsert by marker.
+ *           7. postOrUpdate   → Octokit upsert by marker (MAIN comment).
+ *           6c. sinceLastCommit → if present, post a SEPARATE per-SHA comment;
+ *                               best-effort, never fails the run.
  *           8. setOutput      → comment-id, blast-level, gate-decision.
  *           9. evaluateGate   → setFailed iff blast level meets/exceeds threshold.
  *
@@ -34840,6 +34856,10 @@ async function main() {
     const owner = ctx.repo.owner;
     const repo = ctx.repo.repo;
     const fullName = `${owner}/${repo}`;
+    // New-commit review anchor: the PR head sha, if the payload carries a valid
+    // one. Degrades to undefined (never throws) so a malformed/absent sha simply
+    // omits the anchor rather than failing the run.
+    const headSha = readHeadSha(ctx.payload);
     core.info(`GitNexus Review — PR #${prNumber} (${fullName})`);
     // ── 2. Validate the gate threshold up-front so a typo fails fast,
     //        before any Hub round-trip. Empty input → advisory (null).
@@ -34858,26 +34878,28 @@ async function main() {
         return fail(err, 'hub', 'resolveRepoId');
     }
     try {
-        await (0, hub_client_1.refreshBlast)({ hubUrl, token, repoId, prNumber });
+        await (0, hub_client_1.refreshBlast)({ hubUrl, token, repoId, prNumber, headSha });
     }
     catch (err) {
         return fail(err, 'hub', 'refreshBlast');
     }
     let blast;
     try {
-        blast = await (0, hub_client_1.getBlast)({ hubUrl, token, repoId, prNumber });
+        blast = await (0, hub_client_1.getBlast)({ hubUrl, token, repoId, prNumber, headSha });
     }
     catch (err) {
         return fail(err, 'hub', 'getBlast');
     }
     const rawBody = (0, render_comment_1.renderComment)(blast, { prNumber, hubUrl });
     // ── 6b. If the Hub produced an LLM summary digest (it holds the Azure key
-    //        and rate-limits the call), splice it to the top and collapse the
-    //        detail beneath it. Absent/empty → post the deterministic comment
-    //        unchanged. The Action makes no LLM call of its own.
-    const body = typeof blast.aiSummary === 'string' && blast.aiSummary.trim().length > 0
-        ? (0, slm_format_1.composeWithDigest)(rawBody, blast.aiSummary)
-        : rawBody;
+    //        and rate-limits the call), splice it into the upsert-by-marker MAIN
+    //        comment and collapse detail beneath it. When no digest is present,
+    //        composeWithDigest is not called and the body is byte-identical to the
+    //        deterministic comment. The since-last-commit delta is NOT part of the
+    //        main comment — it is posted separately below. The Action makes no LLM
+    //        call of its own.
+    const hasDigest = typeof blast.aiSummary === 'string' && blast.aiSummary.trim().length > 0;
+    const body = hasDigest ? (0, slm_format_1.composeWithDigest)(rawBody, blast.aiSummary ?? '') : rawBody;
     let posted;
     try {
         const octokit = github.getOctokit(githubToken);
@@ -34896,6 +34918,31 @@ async function main() {
     core.setOutput('comment-id', String(posted.commentId));
     core.setOutput('blast-level', blast.blastLevel);
     core.info(`Comment ${posted.action} (id=${posted.commentId}); blast=${blast.blastLevel}.`);
+    // ── 6c. Best-effort: when the Hub returned a "since last commit" delta (a PR
+    //        re-push), post it as a SEPARATE standalone comment keyed on a per-SHA
+    //        marker. Same-SHA re-runs update that one comment (no duplicate); a new
+    //        commit (new SHA → new marker) creates a fresh comment, building a
+    //        per-commit history in the thread. This is additive: a failure here is
+    //        swallowed via classifyError so it can NEVER fail the run, change the
+    //        comment-id output, or affect the gate — the main review is the contract.
+    const delta = blast.sinceLastCommit;
+    if (delta != null) {
+        try {
+            const octokit = github.getOctokit(githubToken);
+            const sincePosted = await (0, post_comment_1.postOrUpdateComment)({
+                client: (0, post_comment_1.asIssueCommentsClient)(octokit),
+                owner,
+                repo,
+                prNumber,
+                marker: (0, slm_format_1.sinceCommitMarker)(delta.headSha),
+                body: (0, slm_format_1.renderSinceCommitComment)(delta),
+            });
+            core.info(`Since-last-commit comment ${sincePosted.action} (id=${sincePosted.commentId}).`);
+        }
+        catch (err) {
+            core.warning(`since-last-commit comment skipped: ${(0, classify_error_1.classifyError)(err, 'github')}`);
+        }
+    }
     // ── 9. Gate — the only success-path setFailed, evaluated after the
     //        comment is posted so reviewers always have the report.
     const decision = (0, gate_1.evaluateGate)({ blastLevel: blast.blastLevel, threshold });
@@ -34904,6 +34951,21 @@ async function main() {
         core.setFailed(`GitNexus gate: blast level ${blast.blastLevel} meets or exceeds threshold ${threshold}. See PR comment.`);
         return;
     }
+}
+/** SHA shape guard — 7..40 hex. Used to degrade a malformed head sha to undefined. */
+const SHA_RE = /^[0-9a-f]{7,40}$/i;
+/**
+ * @brief: Read the PR head commit SHA from the webhook payload, degrading to
+ *         undefined when it is absent or fails the SHA shape guard. Never throws
+ *         — a malformed/missing sha simply omits the review anchor for this run.
+ *
+ * @params: (payload: unknown) -> The GitHub Actions event payload (ctx.payload).
+ *
+ * @returns: string | undefined — a valid head sha, or undefined to omit the anchor.
+ */
+function readHeadSha(payload) {
+    const sha = payload?.pull_request?.head?.sha;
+    return typeof sha === 'string' && SHA_RE.test(sha) ? sha : undefined;
 }
 /**
  * @brief: Translate any thrown value into a user-visible failure via
@@ -35863,14 +35925,22 @@ function escapeCell(value) {
 
 /**
  * @brief: Compose the Hub-provided `aiSummary` digest into the deterministic
- *         PR comment. The LLM call itself lives on the GitNexus Hub (which
- *         holds the Azure credential and rate-limits the call) — the Action no
- *         longer talks to Azure. The Hub returns a ready-made `## Summary`
- *         block on the BlastResult; this module just splices it in and collapses
- *         the heavy detail beneath it so a huge PR doesn't flood the thread.
+ *         PR comment, and render the standalone "🔁 Since last commit" comment.
+ *         The LLM call itself lives on the GitNexus Hub (which holds the Azure
+ *         credential and rate-limits the call) — the Action no longer talks to
+ *         Azure. The Hub returns a ready-made `## Summary` block on the
+ *         BlastResult; `composeWithDigest` splices it into the MAIN review
+ *         comment and collapses the heavy detail beneath it so a huge PR doesn't
+ *         flood the thread. The since-last-commit delta is NOT part of the main
+ *         comment: when the Hub returns a `sinceLastCommit` (a PR re-push),
+ *         `renderSinceCommitComment` produces a SEPARATE per-commit comment that
+ *         main.ts upserts under its own per-SHA marker, building a per-commit
+ *         history in the thread without touching the main report.
  */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.composeWithDigest = composeWithDigest;
+exports.sinceCommitMarker = sinceCommitMarker;
+exports.renderSinceCommitComment = renderSinceCommitComment;
 /**
  * @brief: Splice the Hub's summary digest into the deterministic comment and
  *         collapse the heavy detail beneath it. The default-visible comment
@@ -35879,18 +35949,22 @@ exports.composeWithDigest = composeWithDigest;
  *         floods the thread. Every detail table is kept verbatim from the
  *         renderer but tucked inside ONE collapsed `<details>` expander, one
  *         click away. Falls back to appending the digest if there is no detail
- *         body (empty-blast comment).
+ *         body (empty-blast comment). This produces the MAIN comment only — it
+ *         carries no since-last-commit delta (that is a separate comment).
  *
  * @params: (rawComment: string) -> Full deterministic comment from renderComment.
  * @params: (digest: string)     -> The `## Summary` block from the Hub (aiSummary).
- * @returns: string — the composed, concise comment.
+ * @returns: string — the composed, concise comment. The COMMENT_MARKER stays the first line.
  */
 function composeWithDigest(rawComment, digest) {
     const block = digest.trim();
     const sep = '\n---\n';
     const i = rawComment.indexOf(sep);
     if (i === -1) {
-        // No section divider (empty-blast comment): nothing heavy to collapse.
+        // No section divider (empty-blast comment): nothing heavy to collapse, so
+        // never introduce a `---` divider or a `<details>` "📋 Full report" expander
+        // this comment never had. Keep today's append-the-digest layout so the
+        // byte-output is preserved.
         return `${rawComment.trimEnd()}\n\n---\n\n${block}\n`;
     }
     // Split at the first divider: head = marker/header/verdict/metrics, rest =
@@ -35900,6 +35974,55 @@ function composeWithDigest(rawComment, digest) {
     const summary = buildDetailSummary(rawComment);
     return (`${head}\n\n${block}\n\n---\n\n` +
         `<details>\n<summary><b>${summary}</b></summary>\n\n${rest}\n\n</details>\n`);
+}
+/** Per-SHA marker prefix for the standalone since-last-commit comment. */
+const SINCE_COMMIT_MARKER_PREFIX = '<!-- gitnexus-since-commit:';
+/**
+ * @brief: Build the per-SHA HTML-comment marker that identifies a single
+ *         "🔁 Since last commit" comment for upsert-by-marker. A distinct
+ *         headSha yields a distinct marker (a new comment); the same headSha
+ *         yields the same marker (an in-place update on re-run). main.ts and
+ *         the tests share this one definition so the scheme stays consistent.
+ *
+ * @params: (headSha: string) -> The PR head commit sha this delta is anchored to.
+ *
+ * @returns: string — `<!-- gitnexus-since-commit:<headSha> -->`.
+ */
+function sinceCommitMarker(headSha) {
+    return `${SINCE_COMMIT_MARKER_PREFIX}${headSha} -->`;
+}
+/**
+ * @brief: Render the full body of the standalone "🔁 Since last commit" comment.
+ *         The body begins with the per-SHA marker line (so postOrUpdateComment
+ *         can upsert by it), followed by the delta block. The `summary` is
+ *         Hub-generated prose (same trust level as the aiSummary digest) and is
+ *         spliced as-is — the renderer escapes nothing here, matching how the
+ *         digest is treated. Anchored on the full `headSha` in the marker; the
+ *         visible header shows the 7-char short sha.
+ *
+ * @params: (sinceLastCommit: SinceLastCommit) -> Hub delta (headSha + summary).
+ *
+ * @returns: string — marker line, blank line, then the delta block.
+ */
+function renderSinceCommitComment(sinceLastCommit) {
+    return `${sinceCommitMarker(sinceLastCommit.headSha)}\n\n${buildDeltaBlock(sinceLastCommit)}`;
+}
+/**
+ * @brief: Truncate a commit sha to its 7-char short form for display. Pure
+ *         presentation — no typeof guard, because normalizeSinceLastCommit
+ *         already guarantees `sha` is a non-empty string before it reaches here.
+ */
+function shortSha(sha) {
+    return sha.length > 7 ? sha.slice(0, 7) : sha;
+}
+/**
+ * @brief: Render the "🔁 Since last commit" delta block. The `summary` is
+ *         Hub-generated prose (same trust level as the aiSummary digest) and is
+ *         spliced as-is — the renderer escapes nothing here, matching how the
+ *         digest is treated. Ends with a single trailing newline.
+ */
+function buildDeltaBlock(d) {
+    return `## 🔁 Since last commit (\`${shortSha(d.headSha)}\`)\n${d.summary}\n`;
 }
 /**
  * @brief: Build the collapsed-expander summary line, e.g.
@@ -35955,6 +36078,7 @@ function buildDetailSummary(rawComment) {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.EMPTY_CROSS_REPO = void 0;
 exports.isBlastResult = isBlastResult;
+exports.normalizeSinceLastCommit = normalizeSinceLastCommit;
 exports.normalizeBlastResult = normalizeBlastResult;
 /**
  * @brief: Zero-state cross-repo envelope. Byte-matches the Hub's own
@@ -36048,7 +36172,40 @@ function isBlastResult(value) {
         typeof value.aiSummary !== 'string') {
         return false;
     }
+    // sinceLastCommit arrived later too; older Hubs omit it. Tolerant — when
+    // present it must be null or an object. We do NOT deep-reject a partial
+    // object here; normalizeSinceLastCommit is the sole type gate that turns a
+    // malformed/partial value into null. Reject only a present non-object,
+    // non-null value (e.g. a string or number).
+    if ('sinceLastCommit' in value &&
+        value.sinceLastCommit !== null &&
+        value.sinceLastCommit !== undefined &&
+        !isObject(value.sinceLastCommit)) {
+        return false;
+    }
     return true;
+}
+/**
+ * @brief: Sole type gate for the `sinceLastCommit` delta. Returns the well-formed
+ *         SinceLastCommit ONLY when both `headSha` AND `summary` are non-empty
+ *         strings; every other shape (absent, null, non-object, missing field,
+ *         empty string, non-string field) collapses to null. The renderer
+ *         tolerates null, so malformed/partial Hub values render as no delta
+ *         rather than throwing.
+ *
+ * @params: (v: unknown) -> The `sinceLastCommit` field off a Hub response body.
+ *
+ * @returns: SinceLastCommit | null — the object when valid, otherwise null.
+ */
+function normalizeSinceLastCommit(v) {
+    if (!isObject(v))
+        return null;
+    const { headSha, summary } = v;
+    if (typeof headSha !== 'string' || headSha.length === 0)
+        return null;
+    if (typeof summary !== 'string' || summary.length === 0)
+        return null;
+    return { headSha, summary };
 }
 /**
  * @brief: Coerce a BlastResult-shaped object into a fully-populated
@@ -36079,6 +36236,7 @@ function normalizeBlastResult(value) {
         graphData: value.graphData ?? { nodes: [], links: [] },
         crossRepo: normalizeCrossRepo(value.crossRepo),
         aiSummary: typeof value.aiSummary === 'string' ? value.aiSummary : null,
+        sinceLastCommit: normalizeSinceLastCommit(value.sinceLastCommit),
         truncated: Boolean(value.truncated),
         stale: Boolean(value.stale),
         prTitle: value.prTitle ?? null,
