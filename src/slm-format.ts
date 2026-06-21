@@ -66,7 +66,7 @@ export function composeWithDigest(
   const summary = buildDetailSummary(rawComment);
   // Delta-only sub-case (empty digest): emit the delta with NO `## Summary`
   // header and no digest splice — just head → delta → collapsed expander.
-  const middle = block === '' ? delta.trimEnd() : `${delta}\n${block}`;
+  const middle = delta === '' ? block : block === '' ? delta.trimEnd() : `${delta}\n${block}`;
   return (
     `${head}\n\n${middle}\n\n---\n\n` +
     `<details>\n<summary><b>${summary}</b></summary>\n\n${rest}\n\n</details>\n`
