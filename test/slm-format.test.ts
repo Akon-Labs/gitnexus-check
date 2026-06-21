@@ -95,3 +95,62 @@ describe('composeWithDigest', () => {
     expect(out).toContain('<summary><b>📋 Full report — 3 symbols</b></summary>');
   });
 });
+
+const SHA40 = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2';
+const DELTA = { headSha: SHA40, summary: '🔁 Fixed the null guard in `parse()`.' };
+
+describe('composeWithDigest — since-last-commit delta', () => {
+  it('(a) renders the delta block ABOVE ## Summary, marker still first line', () => {
+    const out = composeWithDigest(rawComment(), DIGEST, DELTA);
+    expect(out.split('\n')[0]).toBe(MARKER);
+    const deltaIdx = out.indexOf('## 🔁 Since last commit');
+    const summaryIdx = out.indexOf('## Summary');
+    expect(deltaIdx).toBeGreaterThan(0);
+    expect(summaryIdx).toBeGreaterThan(deltaIdx);
+    // shortSha truncation: 40-char sha → 7-char in the header.
+    expect(out).toContain('## 🔁 Since last commit (`a1b2c3d`)');
+    expect(out).toContain('🔁 Fixed the null guard in `parse()`.');
+  });
+
+  it('(b) delta only (empty digest) → delta rendered, NO ## Summary header', () => {
+    const out = composeWithDigest(rawComment(), '', DELTA);
+    expect(out.split('\n')[0]).toBe(MARKER);
+    expect(out).toContain('## 🔁 Since last commit (`a1b2c3d`)');
+    expect(out).not.toContain('## Summary');
+    // Detail still collapsed into the one expander.
+    expect(out).toContain('📋 Full report');
+  });
+
+  it('(c) empty-blast (no divider) + no delta → BYTE-IDENTICAL to today, no 📋 Full report', () => {
+    const empty = `${MARKER}\n\n### GitNexus Review · PR #7\n\nNo impact detected.`;
+    const withField = composeWithDigest(empty, DIGEST, null);
+    const today = composeWithDigest(empty, DIGEST);
+    expect(withField).toBe(today);
+    expect(withField).not.toContain('📋 Full report');
+    expect(withField).toContain('## Summary');
+  });
+
+  it('(d) empty-blast + delta → delta shown, no spurious <details> expander', () => {
+    const empty = `${MARKER}\n\n### GitNexus Review · PR #7\n\nNo impact detected.`;
+    const out = composeWithDigest(empty, DIGEST, DELTA);
+    expect(out.split('\n')[0]).toBe(MARKER);
+    expect(out).toContain('## 🔁 Since last commit (`a1b2c3d`)');
+    expect(out).not.toContain('<details>');
+    expect(out).not.toContain('📋 Full report');
+    // Delta sits above the digest.
+    expect(out.indexOf('## 🔁 Since last commit')).toBeLessThan(out.indexOf('## Summary'));
+  });
+
+  it('(e) digest, no delta (undefined 3rd arg) → byte-identical to two-arg call', () => {
+    expect(composeWithDigest(rawComment(), DIGEST, undefined)).toBe(
+      composeWithDigest(rawComment(), DIGEST),
+    );
+  });
+
+  it('(f) shortSha truncates a 40-char sha to 7 and passes a short string through', () => {
+    const long = composeWithDigest(rawComment(), '', { headSha: SHA40, summary: 's' });
+    expect(long).toContain('(`a1b2c3d`)');
+    const short = composeWithDigest(rawComment(), '', { headSha: 'abc12', summary: 's' });
+    expect(short).toContain('(`abc12`)');
+  });
+});

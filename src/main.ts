@@ -63,6 +63,10 @@ export async function main(): Promise<void> {
   const owner = ctx.repo.owner;
   const repo = ctx.repo.repo;
   const fullName = `${owner}/${repo}`;
+  // New-commit review anchor: the PR head sha, if the payload carries a valid
+  // one. Degrades to undefined (never throws) so a malformed/absent sha simply
+  // omits the anchor rather than failing the run.
+  const headSha = readHeadSha(ctx.payload);
 
   core.info(`GitNexus Review — PR #${prNumber} (${fullName})`);
 
@@ -83,14 +87,14 @@ export async function main(): Promise<void> {
   }
 
   try {
-    await refreshBlast({ hubUrl, token, repoId, prNumber });
+    await refreshBlast({ hubUrl, token, repoId, prNumber, headSha });
   } catch (err) {
     return fail(err, 'hub', 'refreshBlast');
   }
 
   let blast;
   try {
-    blast = await getBlast({ hubUrl, token, repoId, prNumber });
+    blast = await getBlast({ hubUrl, token, repoId, prNumber, headSha });
   } catch (err) {
     return fail(err, 'hub', 'getBlast');
   }
@@ -98,12 +102,16 @@ export async function main(): Promise<void> {
   const rawBody = renderComment(blast, { prNumber, hubUrl });
 
   // ── 6b. If the Hub produced an LLM summary digest (it holds the Azure key
-  //        and rate-limits the call), splice it to the top and collapse the
-  //        detail beneath it. Absent/empty → post the deterministic comment
-  //        unchanged. The Action makes no LLM call of its own.
+  //        and rate-limits the call) and/or a "since last commit" delta (a PR
+  //        re-push), splice them into the SAME upsert-by-marker comment: delta
+  //        above the digest, detail collapsed beneath. When NEITHER is present,
+  //        composeWithDigest is not called and the body is byte-identical to the
+  //        deterministic comment. The Action makes no LLM call of its own.
+  const hasDigest = typeof blast.aiSummary === 'string' && blast.aiSummary.trim().length > 0;
+  const hasDelta = blast.sinceLastCommit != null;
   const body =
-    typeof blast.aiSummary === 'string' && blast.aiSummary.trim().length > 0
-      ? composeWithDigest(rawBody, blast.aiSummary)
+    hasDigest || hasDelta
+      ? composeWithDigest(rawBody, blast.aiSummary ?? '', blast.sinceLastCommit ?? undefined)
       : rawBody;
 
   let posted;
@@ -135,6 +143,23 @@ export async function main(): Promise<void> {
     );
     return;
   }
+}
+
+/** SHA shape guard — 7..40 hex. Used to degrade a malformed head sha to undefined. */
+const SHA_RE = /^[0-9a-f]{7,40}$/i;
+
+/**
+ * @brief: Read the PR head commit SHA from the webhook payload, degrading to
+ *         undefined when it is absent or fails the SHA shape guard. Never throws
+ *         — a malformed/missing sha simply omits the review anchor for this run.
+ *
+ * @params: (payload: unknown) -> The GitHub Actions event payload (ctx.payload).
+ *
+ * @returns: string | undefined — a valid head sha, or undefined to omit the anchor.
+ */
+function readHeadSha(payload: unknown): string | undefined {
+  const sha = (payload as { pull_request?: { head?: { sha?: unknown } } })?.pull_request?.head?.sha;
+  return typeof sha === 'string' && SHA_RE.test(sha) ? sha : undefined;
 }
 
 /**

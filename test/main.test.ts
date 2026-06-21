@@ -34,6 +34,7 @@ const ghContext = {
   payload: {
     pull_request: {
       number: 152,
+      head: { sha: undefined as unknown },
     },
   },
   repo: { owner: 'Akon-Labs', repo: 'gitnexus-enterprise' },
@@ -105,6 +106,7 @@ beforeEach(() => {
   inputs['github-token'] = 'ghp_test';
   ghContext.eventName = 'pull_request';
   ghContext.payload.pull_request.number = 152;
+  ghContext.payload.pull_request.head = { sha: undefined };
   setFailedSpy.mockReset();
   warningSpy.mockReset();
   errorSpy.mockReset();
@@ -178,6 +180,48 @@ describe('main — happy path', () => {
     const body = (postSpy.mock.calls[0][0] as { body: string }).body;
     expect(body).not.toContain('## Summary');
     expect(body).not.toContain('📋 Full report');
+  });
+
+  it('posts the raw rendered body (compose not invoked) when neither aiSummary nor sinceLastCommit is present', async () => {
+    resolveSpy.mockResolvedValue('repo-uuid');
+    refreshSpy.mockResolvedValue(undefined);
+    const blastRaw = loadFullBlast();
+    const { isBlastResult, normalizeBlastResult } = await import('../src/types/blast-result');
+    if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
+    const blast = normalizeBlastResult(blastRaw); // no aiSummary, no sinceLastCommit
+    getBlastSpy.mockResolvedValue(blast);
+    postSpy.mockResolvedValue({ commentId: 1, action: 'created' });
+
+    // Compute the raw rendered comment the same way main does, to assert equality.
+    const { renderComment } = await import('../src/render-comment');
+    const expected = renderComment(blast, { prNumber: 152, hubUrl: 'https://hub.example.com' });
+
+    const { main } = await import('../src/main');
+    await main();
+
+    const body = (postSpy.mock.calls[0][0] as { body: string }).body;
+    expect(body).toBe(expected);
+    expect(body).not.toContain('## 🔁 Since last commit');
+  });
+
+  it('splices the since-last-commit delta into the posted body when present (no aiSummary)', async () => {
+    resolveSpy.mockResolvedValue('repo-uuid');
+    refreshSpy.mockResolvedValue(undefined);
+    const blastRaw = loadFullBlast();
+    const { isBlastResult, normalizeBlastResult } = await import('../src/types/blast-result');
+    if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
+    const blast = normalizeBlastResult(blastRaw);
+    blast.sinceLastCommit = { headSha: 'a1b2c3d4e5f6a1b2c3d4', summary: 'reworked the parser' };
+    getBlastSpy.mockResolvedValue(blast);
+    postSpy.mockResolvedValue({ commentId: 1, action: 'created' });
+
+    const { main } = await import('../src/main');
+    await main();
+
+    const body = (postSpy.mock.calls[0][0] as { body: string }).body;
+    expect(body).toContain('## 🔁 Since last commit (`a1b2c3d`)');
+    expect(body).toContain('reworked the parser');
+    expect(body).not.toContain('## Summary'); // no digest present
   });
 });
 
@@ -311,6 +355,49 @@ describe('main — gate', () => {
     expect(resolveSpy).not.toHaveBeenCalled();
     expect(refreshSpy).not.toHaveBeenCalled();
     expect(getBlastSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('main — head sha anchor (readHeadSha)', () => {
+  async function setupHappy(): Promise<void> {
+    resolveSpy.mockResolvedValue('repo-uuid');
+    refreshSpy.mockResolvedValue(undefined);
+    const blastRaw = loadFullBlast();
+    const { isBlastResult, normalizeBlastResult } = await import('../src/types/blast-result');
+    if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
+    getBlastSpy.mockResolvedValue(normalizeBlastResult(blastRaw));
+    postSpy.mockResolvedValue({ commentId: 1, action: 'created' });
+  }
+
+  it('passes a valid head sha through to refreshBlast and getBlast', async () => {
+    await setupHappy();
+    ghContext.payload.pull_request.head = { sha: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2' };
+    const { main } = await import('../src/main');
+    await main();
+    expect((refreshSpy.mock.calls[0][0] as { headSha?: string }).headSha).toBe(
+      'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2',
+    );
+    expect((getBlastSpy.mock.calls[0][0] as { headSha?: string }).headSha).toBe(
+      'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2',
+    );
+  });
+
+  it('degrades a malformed head sha to undefined (never throws)', async () => {
+    await setupHappy();
+    ghContext.payload.pull_request.head = { sha: 'not-a-real-sha!!' };
+    const { main } = await import('../src/main');
+    await main();
+    expect((refreshSpy.mock.calls[0][0] as { headSha?: string }).headSha).toBeUndefined();
+    expect(setFailedSpy).not.toHaveBeenCalled();
+  });
+
+  it('degrades an absent head sha to undefined', async () => {
+    await setupHappy();
+    ghContext.payload.pull_request.head = { sha: undefined };
+    const { main } = await import('../src/main');
+    await main();
+    expect((refreshSpy.mock.calls[0][0] as { headSha?: string }).headSha).toBeUndefined();
+    expect((getBlastSpy.mock.calls[0][0] as { headSha?: string }).headSha).toBeUndefined();
   });
 });
 

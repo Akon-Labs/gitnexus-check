@@ -199,6 +199,21 @@ export const EMPTY_CROSS_REPO: CrossRepoResult = {
   error: null,
 };
 
+/**
+ * @brief: "Since last commit" delta returned by the Hub when a PR receives a
+ *         new push: a short Hub-generated `summary` of what changed since the
+ *         previously-reviewed commit, anchored to the new `headSha`. Optional +
+ *         nullable on the BlastResult — older Hubs omit it entirely, and the Hub
+ *         sends null when there is no prior commit to diff against.
+ *
+ * @params: (headSha) -> The PR head commit sha this delta was computed against.
+ * @params: (summary) -> Hub-generated prose describing the change since last commit.
+ */
+export interface SinceLastCommit {
+  headSha: string;
+  summary: string;
+}
+
 export interface BlastResult {
   blastLevel: BlastLevel;
 
@@ -235,6 +250,11 @@ export interface BlastResult {
   // rate-limits the call). Absent/null on older Hubs or when the Hub skipped
   // it — the Action then posts the deterministic comment unchanged.
   aiSummary?: string | null;
+
+  // "Since last commit" delta produced by the Hub when a PR is re-pushed.
+  // Absent on older Hubs; null when there is no prior commit to diff against.
+  // Rendered above the digest in the single upsert-by-marker comment.
+  sinceLastCommit?: SinceLastCommit | null;
 }
 
 /**
@@ -320,7 +340,41 @@ export function isBlastResult(value: unknown): value is BlastResult {
     return false;
   }
 
+  // sinceLastCommit arrived later too; older Hubs omit it. Tolerant — when
+  // present it must be null or an object. We do NOT deep-reject a partial
+  // object here; normalizeSinceLastCommit is the sole type gate that turns a
+  // malformed/partial value into null. Reject only a present non-object,
+  // non-null value (e.g. a string or number).
+  if (
+    'sinceLastCommit' in value &&
+    value.sinceLastCommit !== null &&
+    value.sinceLastCommit !== undefined &&
+    !isObject(value.sinceLastCommit)
+  ) {
+    return false;
+  }
+
   return true;
+}
+
+/**
+ * @brief: Sole type gate for the `sinceLastCommit` delta. Returns the well-formed
+ *         SinceLastCommit ONLY when both `headSha` AND `summary` are non-empty
+ *         strings; every other shape (absent, null, non-object, missing field,
+ *         empty string, non-string field) collapses to null. The renderer
+ *         tolerates null, so malformed/partial Hub values render as no delta
+ *         rather than throwing.
+ *
+ * @params: (v: unknown) -> The `sinceLastCommit` field off a Hub response body.
+ *
+ * @returns: SinceLastCommit | null — the object when valid, otherwise null.
+ */
+export function normalizeSinceLastCommit(v: unknown): SinceLastCommit | null {
+  if (!isObject(v)) return null;
+  const { headSha, summary } = v;
+  if (typeof headSha !== 'string' || headSha.length === 0) return null;
+  if (typeof summary !== 'string' || summary.length === 0) return null;
+  return { headSha, summary };
 }
 
 /**
@@ -352,6 +406,7 @@ export function normalizeBlastResult(value: BlastResult): BlastResult {
     graphData: value.graphData ?? { nodes: [], links: [] },
     crossRepo: normalizeCrossRepo(value.crossRepo),
     aiSummary: typeof value.aiSummary === 'string' ? value.aiSummary : null,
+    sinceLastCommit: normalizeSinceLastCommit(value.sinceLastCommit),
     truncated: Boolean(value.truncated),
     stale: Boolean(value.stale),
     prTitle: value.prTitle ?? null,
