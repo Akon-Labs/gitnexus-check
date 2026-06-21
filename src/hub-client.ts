@@ -26,6 +26,9 @@ export const ACTION_DEVICE_FINGERPRINT = 'gitnexus-check-action';
 const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024; // 5MB hard cap on JSON body
 
+/** SHA shape guard — 7..40 hex. A present-but-malformed headSha throws (loud). */
+const SHA_RE = /^[0-9a-f]{7,40}$/i;
+
 /**
  * @brief: Validate a URL string at the trust boundary. Rejects anything
  *         not `https://` and strips at most one trailing slash so the
@@ -91,15 +94,18 @@ export async function resolveRepoId(opts: {
  * @params: (opts.token: string)    -> gnx_ device Bearer token.
  * @params: (opts.repoId: string)   -> Hub repo UUID from resolveRepoId.
  * @params: (opts.prNumber: number) -> GitHub PR number to refresh.
+ * @params: (opts.headSha?: string) -> Optional PR head sha (review anchor); a
+ *   present-but-malformed value throws, absent omits the ?headSha= query string.
  *
  * @returns: void
- * @call-routes: POST /api/repos/:repoId/prs/:prNumber/refresh
+ * @call-routes: POST /api/repos/:repoId/prs/:prNumber/refresh (optional ?headSha=<sha>)
  */
 export async function refreshBlast(opts: {
   hubUrl: string;
   token: string;
   repoId: string;
   prNumber: number;
+  headSha?: string;
 }): Promise<void> {
   if (!/^[A-Za-z0-9-]+$/.test(opts.repoId)) {
     throw new Error(`invalid repoId shape: ${opts.repoId}`);
@@ -107,11 +113,15 @@ export async function refreshBlast(opts: {
   if (!Number.isInteger(opts.prNumber) || opts.prNumber <= 0) {
     throw new Error(`invalid prNumber: ${String(opts.prNumber)}`);
   }
+  if (opts.headSha !== undefined && !SHA_RE.test(opts.headSha)) {
+    throw new Error('invalid headSha shape');
+  }
   await axios.post(
     `${opts.hubUrl}/api/repos/${opts.repoId}/prs/${opts.prNumber}/refresh`,
     {},
     {
       headers: hubHeaders(opts.token),
+      params: opts.headSha ? { headSha: opts.headSha } : undefined,
       timeout: 5 * 60_000, // /refresh may run a full graph walk; allow 5min
       maxContentLength: MAX_RESPONSE_BYTES,
       maxBodyLength: MAX_RESPONSE_BYTES,
@@ -131,16 +141,19 @@ export async function refreshBlast(opts: {
  * @params: (opts.token: string)    -> gnx_ device Bearer token.
  * @params: (opts.repoId: string)   -> Hub repo UUID.
  * @params: (opts.prNumber: number) -> GitHub PR number.
+ * @params: (opts.headSha?: string) -> Optional PR head sha (review anchor); a
+ *   present-but-malformed value throws, absent omits the ?headSha= query string.
  *
  * @returns: BlastResult — normalised; all arrays guaranteed present.
  * @throws: SchemaMismatchError when the body fails isBlastResult validation.
- * @call-routes: GET /api/repos/:repoId/prs/:prNumber
+ * @call-routes: GET /api/repos/:repoId/prs/:prNumber (optional ?headSha=<sha>)
  */
 export async function getBlast(opts: {
   hubUrl: string;
   token: string;
   repoId: string;
   prNumber: number;
+  headSha?: string;
 }): Promise<BlastResult> {
   if (!/^[A-Za-z0-9-]+$/.test(opts.repoId)) {
     throw new Error(`invalid repoId shape: ${opts.repoId}`);
@@ -148,10 +161,14 @@ export async function getBlast(opts: {
   if (!Number.isInteger(opts.prNumber) || opts.prNumber <= 0) {
     throw new Error(`invalid prNumber: ${String(opts.prNumber)}`);
   }
+  if (opts.headSha !== undefined && !SHA_RE.test(opts.headSha)) {
+    throw new Error('invalid headSha shape');
+  }
   const res = await axios.get(
     `${opts.hubUrl}/api/repos/${opts.repoId}/prs/${opts.prNumber}`,
     {
       headers: hubHeaders(opts.token),
+      params: opts.headSha ? { headSha: opts.headSha } : undefined,
       timeout: DEFAULT_TIMEOUT_MS,
       maxContentLength: MAX_RESPONSE_BYTES,
       maxBodyLength: MAX_RESPONSE_BYTES,

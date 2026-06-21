@@ -124,6 +124,44 @@ describe('refreshBlast', () => {
       refreshBlast({ hubUrl: HUB, token: TOKEN, repoId: 'abc', prNumber: 0 }),
     ).rejects.toThrow('invalid prNumber');
   });
+
+  it('sends the ?headSha= query param when a valid headSha is present', async () => {
+    mockedAxios.post.mockResolvedValueOnce({ data: { blastLevel: 'LOW' } });
+    await refreshBlast({
+      hubUrl: HUB,
+      token: TOKEN,
+      repoId: 'abc-123',
+      prNumber: 7,
+      headSha: 'a1b2c3d4e5f6',
+    });
+    expect(mockedAxios.post).toHaveBeenCalledWith(
+      `${HUB}/api/repos/abc-123/prs/7/refresh`,
+      {},
+      expect.objectContaining({ params: { headSha: 'a1b2c3d4e5f6' } }),
+    );
+  });
+
+  it('omits params when no headSha is supplied', async () => {
+    mockedAxios.post.mockResolvedValueOnce({ data: { blastLevel: 'LOW' } });
+    await refreshBlast({ hubUrl: HUB, token: TOKEN, repoId: 'abc-123', prNumber: 7 });
+    expect(mockedAxios.post).toHaveBeenCalledWith(
+      `${HUB}/api/repos/abc-123/prs/7/refresh`,
+      {},
+      expect.objectContaining({ params: undefined }),
+    );
+  });
+
+  it('throws on a present-but-malformed headSha', async () => {
+    await expect(
+      refreshBlast({
+        hubUrl: HUB,
+        token: TOKEN,
+        repoId: 'abc-123',
+        prNumber: 7,
+        headSha: 'not-a-sha!!',
+      }),
+    ).rejects.toThrow('invalid headSha shape');
+  });
 });
 
 describe('getBlast', () => {
@@ -156,5 +194,37 @@ describe('getBlast', () => {
         'X-Device-Fingerprint': ACTION_DEVICE_FINGERPRINT,
       }),
     });
+  });
+
+  it('sends the ?headSha= query param when a valid headSha is present', async () => {
+    mockedAxios.get.mockResolvedValueOnce({ data: loadFullBlast() });
+    await getBlast({
+      hubUrl: HUB,
+      token: TOKEN,
+      repoId: 'abc-123',
+      prNumber: 152,
+      headSha: 'a1b2c3d4e5f6',
+    });
+    expect(mockedAxios.get.mock.calls[0][1]).toMatchObject({
+      params: { headSha: 'a1b2c3d4e5f6' },
+    });
+  });
+
+  it('omits params when no headSha is supplied', async () => {
+    mockedAxios.get.mockResolvedValueOnce({ data: loadFullBlast() });
+    await getBlast({ hubUrl: HUB, token: TOKEN, repoId: 'abc-123', prNumber: 152 });
+    expect(mockedAxios.get.mock.calls[0][1]).toMatchObject({ params: undefined });
+  });
+
+  it('throws on a present-but-malformed headSha', async () => {
+    await expect(
+      getBlast({
+        hubUrl: HUB,
+        token: TOKEN,
+        repoId: 'abc-123',
+        prNumber: 152,
+        headSha: 'xyz',
+      }),
+    ).rejects.toThrow('invalid headSha shape');
   });
 });

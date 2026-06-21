@@ -1,0 +1,26 @@
+{
+  "prNumber": 152,
+  "prTitle": "fix: tighten the null guard in parse()",
+  "prAuthor": "octocat",
+  "prBranch": "fix/null-guard",
+  "prStatus": "open",
+  "blastLevel": "MEDIUM",
+  "changedSymbols": [],
+  "d1Symbols": [],
+  "d2Symbols": [],
+  "d3Symbols": [],
+  "affectedFlows": [],
+  "affectedModules": [],
+  "changedFiles": [],
+  "fileRiskLevel": "LOW",
+  "riskFiles": [],
+  "graphData": { "nodes": [], "links": [] },
+  "truncated": false,
+  "stale": false,
+  "computedAt": "2026-05-17T18:07:45.285Z",
+  "aiSummary": "## Summary\n\n🟡 MEDIUM — a focused fix to the parser.",
+  "sinceLastCommit": {
+    "headSha": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2",
+    "summary": "🔁 Replaced the unchecked cast with a typed guard in `parse()`."
+  }
+}

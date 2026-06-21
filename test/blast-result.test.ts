@@ -4,6 +4,7 @@ import * as path from 'node:path';
 import {
   isBlastResult,
   normalizeBlastResult,
+  normalizeSinceLastCommit,
   EMPTY_CROSS_REPO,
   type BlastResult,
 } from '../src/types/blast-result';
@@ -155,6 +156,61 @@ describe('isBlastResult', () => {
       isBlastResult({ blastLevel: 'LOW', truncated: false, computedAt: 'x', aiSummary: 123 }),
     ).toBe(false);
   });
+
+  it('stays true when sinceLastCommit is absent (old Hub) or null', () => {
+    const base = { blastLevel: 'LOW', truncated: false, computedAt: 'x' };
+    expect(isBlastResult(base)).toBe(true);
+    expect(isBlastResult({ ...base, sinceLastCommit: null })).toBe(true);
+    expect(
+      isBlastResult({ ...base, sinceLastCommit: { headSha: 'abc1234', summary: 'fix' } }),
+    ).toBe(true);
+  });
+
+  it('tolerates a partial sinceLastCommit object (normalize is the gate, not the guard)', () => {
+    const base = { blastLevel: 'LOW', truncated: false, computedAt: 'x' };
+    // A present object passes the tolerant guard even when fields are missing;
+    // normalizeSinceLastCommit is what collapses it to null later.
+    expect(isBlastResult({ ...base, sinceLastCommit: {} })).toBe(true);
+    expect(isBlastResult({ ...base, sinceLastCommit: { headSha: 'abc1234' } })).toBe(true);
+  });
+
+  it('rejects when sinceLastCommit is present as a non-object, non-null value', () => {
+    const base = { blastLevel: 'LOW', truncated: false, computedAt: 'x' };
+    expect(isBlastResult({ ...base, sinceLastCommit: 'oops' })).toBe(false);
+    expect(isBlastResult({ ...base, sinceLastCommit: 42 })).toBe(false);
+  });
+});
+
+describe('normalizeSinceLastCommit', () => {
+  it('keeps a valid {headSha, summary}', () => {
+    expect(
+      normalizeSinceLastCommit({ headSha: 'a1b2c3d4e5f6', summary: 'tightened the guard' }),
+    ).toEqual({ headSha: 'a1b2c3d4e5f6', summary: 'tightened the guard' });
+  });
+
+  it('returns null for absent / null / non-object values', () => {
+    expect(normalizeSinceLastCommit(undefined)).toBeNull();
+    expect(normalizeSinceLastCommit(null)).toBeNull();
+    expect(normalizeSinceLastCommit('oops')).toBeNull();
+    expect(normalizeSinceLastCommit(42)).toBeNull();
+    expect(normalizeSinceLastCommit([])).toBeNull();
+  });
+
+  it('returns null when a required field is missing', () => {
+    expect(normalizeSinceLastCommit({})).toBeNull();
+    expect(normalizeSinceLastCommit({ headSha: 'abc1234' })).toBeNull();
+    expect(normalizeSinceLastCommit({ summary: 'fix' })).toBeNull();
+  });
+
+  it('returns null for empty-string headSha or summary', () => {
+    expect(normalizeSinceLastCommit({ headSha: '', summary: 'fix' })).toBeNull();
+    expect(normalizeSinceLastCommit({ headSha: 'abc1234', summary: '' })).toBeNull();
+  });
+
+  it('returns null for non-string headSha or summary', () => {
+    expect(normalizeSinceLastCommit({ headSha: 123, summary: 'fix' })).toBeNull();
+    expect(normalizeSinceLastCommit({ headSha: 'abc1234', summary: 123 })).toBeNull();
+  });
 });
 
 describe('normalizeBlastResult', () => {
@@ -250,6 +306,38 @@ describe('normalizeBlastResult', () => {
       computedAt: 'x',
     } as unknown as BlastResult;
     expect(normalizeBlastResult(v).crossRepo).toEqual(EMPTY_CROSS_REPO);
+  });
+
+  it('round-trips the since-commit fixture, preserving the delta and digest', () => {
+    const v = loadFixture('blast-result-since-commit.json');
+    expect(isBlastResult(v)).toBe(true);
+    const out = normalizeBlastResult(v as BlastResult);
+    expect(out.sinceLastCommit).toEqual({
+      headSha: 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2',
+      summary: '🔁 Replaced the unchecked cast with a typed guard in `parse()`.',
+    });
+    expect(out.aiSummary).toContain('## Summary');
+  });
+
+  it('gates sinceLastCommit through normalizeSinceLastCommit (valid kept, partial → null)', () => {
+    const base = {
+      blastLevel: 'LOW',
+      truncated: false,
+      computedAt: 'x',
+    } as unknown as BlastResult;
+    expect(normalizeBlastResult(base).sinceLastCommit).toBeNull();
+    expect(
+      normalizeBlastResult({
+        ...base,
+        sinceLastCommit: { headSha: 'a1b2c3d', summary: 'fixed it' },
+      } as unknown as BlastResult).sinceLastCommit,
+    ).toEqual({ headSha: 'a1b2c3d', summary: 'fixed it' });
+    expect(
+      normalizeBlastResult({
+        ...base,
+        sinceLastCommit: { headSha: 'a1b2c3d' },
+      } as unknown as BlastResult).sinceLastCommit,
+    ).toBeNull();
   });
 });
 
