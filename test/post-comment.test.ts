@@ -138,6 +138,76 @@ describe('postOrUpdateComment — update path', () => {
   });
 });
 
+describe('postOrUpdateComment — per-SHA since-commit marker idempotency', () => {
+  const SHA_MARKER = '<!-- gitnexus-since-commit:a1b2c3d4e5f6 -->';
+  const SHA_BODY = `${SHA_MARKER}\n\n## 🔁 Since last commit (\`a1b2c3d\`)\nreworked it`;
+
+  it('creates a new comment when the per-SHA marker is not present (new commit)', async () => {
+    const { client, spies } = makeClient({
+      pages: [[{ id: 9, body: '<!-- gitnexus-review-v1 -->\nmain report' }]],
+      createId: 321,
+    });
+    const res = await postOrUpdateComment({
+      client,
+      owner: 'a',
+      repo: 'b',
+      prNumber: 7,
+      marker: SHA_MARKER,
+      body: SHA_BODY,
+    });
+    expect(res).toEqual({ commentId: 321, action: 'created' });
+    expect(spies.createComment).toHaveBeenCalledOnce();
+    expect(spies.updateComment).not.toHaveBeenCalled();
+  });
+
+  it('updates in place on a same-SHA re-run (no duplicate)', async () => {
+    const { client, spies } = makeClient({
+      pages: [
+        [
+          { id: 9, body: '<!-- gitnexus-review-v1 -->\nmain report' },
+          { id: 88, body: `previous ${SHA_MARKER} body` },
+        ],
+      ],
+      updateId: 88,
+    });
+    const res = await postOrUpdateComment({
+      client,
+      owner: 'a',
+      repo: 'b',
+      prNumber: 7,
+      marker: SHA_MARKER,
+      body: SHA_BODY,
+    });
+    expect(res).toEqual({ commentId: 88, action: 'updated' });
+    expect(spies.updateComment).toHaveBeenCalledOnce();
+    expect(spies.createComment).not.toHaveBeenCalled();
+  });
+
+  it('the main v1 marker and a per-SHA marker upsert independently (coexist)', async () => {
+    // A thread already holding the main comment AND a since-commit comment for a
+    // DIFFERENT sha: a new sha's marker must miss both and create afresh.
+    const { client, spies } = makeClient({
+      pages: [
+        [
+          { id: 9, body: '<!-- gitnexus-review-v1 -->\nmain report' },
+          { id: 10, body: '<!-- gitnexus-since-commit:ffffff0 -->\nolder delta' },
+        ],
+      ],
+      createId: 654,
+    });
+    const res = await postOrUpdateComment({
+      client,
+      owner: 'a',
+      repo: 'b',
+      prNumber: 7,
+      marker: SHA_MARKER, // a1b2c3d4e5f6 — not present
+      body: SHA_BODY,
+    });
+    expect(res).toEqual({ commentId: 654, action: 'created' });
+    expect(spies.createComment).toHaveBeenCalledOnce();
+  });
+});
+
 describe('postOrUpdateComment — error handling', () => {
   it('propagates GitHub 403 errors (caller will classifyError)', async () => {
     const err = new Error('forbidden');

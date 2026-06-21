@@ -3,7 +3,11 @@
  * digest into the deterministic comment and collapsing the heavy detail.
  */
 import { describe, it, expect } from 'vitest';
-import { composeWithDigest } from '../src/slm-format';
+import {
+  composeWithDigest,
+  renderSinceCommitComment,
+  sinceCommitMarker,
+} from '../src/slm-format';
 
 const MARKER = '<!-- gitnexus-review-v1 -->';
 
@@ -96,61 +100,56 @@ describe('composeWithDigest', () => {
   });
 });
 
+describe('composeWithDigest — main comment carries NO since-last-commit delta', () => {
+  it('the digest-spliced main comment never contains the delta block', () => {
+    const out = composeWithDigest(rawComment(), DIGEST);
+    expect(out).not.toContain('## 🔁 Since last commit');
+    expect(out).not.toContain('gitnexus-since-commit');
+  });
+
+  it('the empty-blast main comment never contains the delta block', () => {
+    const empty = `${MARKER}\n\n### GitNexus Review · PR #7\n\nNo impact detected.`;
+    const out = composeWithDigest(empty, DIGEST);
+    expect(out).not.toContain('## 🔁 Since last commit');
+  });
+});
+
 const SHA40 = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2';
 const DELTA = { headSha: SHA40, summary: '🔁 Fixed the null guard in `parse()`.' };
 
-describe('composeWithDigest — since-last-commit delta', () => {
-  it('(a) renders the delta block ABOVE ## Summary, marker still first line', () => {
-    const out = composeWithDigest(rawComment(), DIGEST, DELTA);
-    expect(out.split('\n')[0]).toBe(MARKER);
-    const deltaIdx = out.indexOf('## 🔁 Since last commit');
-    const summaryIdx = out.indexOf('## Summary');
-    expect(deltaIdx).toBeGreaterThan(0);
-    expect(summaryIdx).toBeGreaterThan(deltaIdx);
-    // shortSha truncation: 40-char sha → 7-char in the header.
+describe('renderSinceCommitComment — standalone per-commit comment', () => {
+  it('begins with the per-SHA marker line', () => {
+    const out = renderSinceCommitComment(DELTA);
+    expect(out.split('\n')[0]).toBe(`<!-- gitnexus-since-commit:${SHA40} -->`);
+    expect(out.split('\n')[0]).toBe(sinceCommitMarker(SHA40));
+  });
+
+  it('contains the delta block (short sha header) and the verbatim summary', () => {
+    const out = renderSinceCommitComment(DELTA);
+    // shortSha truncation: 40-char sha → 7-char in the visible header.
     expect(out).toContain('## 🔁 Since last commit (`a1b2c3d`)');
     expect(out).toContain('🔁 Fixed the null guard in `parse()`.');
   });
 
-  it('(b) delta only (empty digest) → delta rendered, NO ## Summary header', () => {
-    const out = composeWithDigest(rawComment(), '', DELTA);
-    expect(out.split('\n')[0]).toBe(MARKER);
-    expect(out).toContain('## 🔁 Since last commit (`a1b2c3d`)');
-    expect(out).not.toContain('## Summary');
-    // Detail still collapsed into the one expander.
-    expect(out).toContain('📋 Full report');
-  });
-
-  it('(c) empty-blast (no divider) + no delta → BYTE-IDENTICAL to today, no 📋 Full report', () => {
-    const empty = `${MARKER}\n\n### GitNexus Review · PR #7\n\nNo impact detected.`;
-    const withField = composeWithDigest(empty, DIGEST, null);
-    const today = composeWithDigest(empty, DIGEST);
-    expect(withField).toBe(today);
-    expect(withField).not.toContain('📋 Full report');
-    expect(withField).toContain('## Summary');
-  });
-
-  it('(d) empty-blast + delta → delta shown, no spurious <details> expander', () => {
-    const empty = `${MARKER}\n\n### GitNexus Review · PR #7\n\nNo impact detected.`;
-    const out = composeWithDigest(empty, DIGEST, DELTA);
-    expect(out.split('\n')[0]).toBe(MARKER);
-    expect(out).toContain('## 🔁 Since last commit (`a1b2c3d`)');
-    expect(out).not.toContain('<details>');
-    expect(out).not.toContain('📋 Full report');
-    // Delta sits above the digest.
-    expect(out.indexOf('## 🔁 Since last commit')).toBeLessThan(out.indexOf('## Summary'));
-  });
-
-  it('(e) digest, no delta (undefined 3rd arg) → byte-identical to two-arg call', () => {
-    expect(composeWithDigest(rawComment(), DIGEST, undefined)).toBe(
-      composeWithDigest(rawComment(), DIGEST),
+  it('the marker (full sha) appears before the visible short-sha header', () => {
+    const out = renderSinceCommitComment(DELTA);
+    expect(out.indexOf(sinceCommitMarker(SHA40))).toBeLessThan(
+      out.indexOf('## 🔁 Since last commit'),
     );
   });
 
-  it('(f) shortSha truncates a 40-char sha to 7 and passes a short string through', () => {
-    const long = composeWithDigest(rawComment(), '', { headSha: SHA40, summary: 's' });
-    expect(long).toContain('(`a1b2c3d`)');
-    const short = composeWithDigest(rawComment(), '', { headSha: 'abc12', summary: 's' });
-    expect(short).toContain('(`abc12`)');
+  it('shortSha truncates a 40-char sha to 7 and passes a short string through', () => {
+    expect(renderSinceCommitComment({ headSha: SHA40, summary: 's' })).toContain('(`a1b2c3d`)');
+    expect(renderSinceCommitComment({ headSha: 'abc12', summary: 's' })).toContain('(`abc12`)');
+  });
+});
+
+describe('sinceCommitMarker — per-SHA idempotency key', () => {
+  it('is distinct per head sha and stable for the same sha', () => {
+    const a = sinceCommitMarker('aaaaaaa');
+    const b = sinceCommitMarker('bbbbbbb');
+    expect(a).toBe('<!-- gitnexus-since-commit:aaaaaaa -->');
+    expect(a).not.toBe(b);
+    expect(sinceCommitMarker('aaaaaaa')).toBe(a);
   });
 });

@@ -1,14 +1,16 @@
 /**
  * @brief: Compose the Hub-provided `aiSummary` digest into the deterministic
- *         PR comment. The LLM call itself lives on the GitNexus Hub (which
- *         holds the Azure credential and rate-limits the call) — the Action no
- *         longer talks to Azure. The Hub returns a ready-made `## Summary`
- *         block on the BlastResult; this module just splices it in and collapses
- *         the heavy detail beneath it so a huge PR doesn't flood the thread.
- *         When the Hub also returns a `sinceLastCommit` delta (a PR re-push),
- *         a "🔁 Since last commit" block is rendered above the digest so a
- *         reviewer sees the latest change first — all in the SAME single
- *         upsert-by-marker comment.
+ *         PR comment, and render the standalone "🔁 Since last commit" comment.
+ *         The LLM call itself lives on the GitNexus Hub (which holds the Azure
+ *         credential and rate-limits the call) — the Action no longer talks to
+ *         Azure. The Hub returns a ready-made `## Summary` block on the
+ *         BlastResult; `composeWithDigest` splices it into the MAIN review
+ *         comment and collapses the heavy detail beneath it so a huge PR doesn't
+ *         flood the thread. The since-last-commit delta is NOT part of the main
+ *         comment: when the Hub returns a `sinceLastCommit` (a PR re-push),
+ *         `renderSinceCommitComment` produces a SEPARATE per-commit comment that
+ *         main.ts upserts under its own per-SHA marker, building a per-commit
+ *         history in the thread without touching the main report.
  */
 
 import type { SinceLastCommit } from './types/blast-result';
@@ -21,56 +23,70 @@ import type { SinceLastCommit } from './types/blast-result';
  *         floods the thread. Every detail table is kept verbatim from the
  *         renderer but tucked inside ONE collapsed `<details>` expander, one
  *         click away. Falls back to appending the digest if there is no detail
- *         body (empty-blast comment).
+ *         body (empty-blast comment). This produces the MAIN comment only — it
+ *         carries no since-last-commit delta (that is a separate comment).
  *
- * @params: (rawComment: string)                      -> Full deterministic comment from renderComment.
- * @params: (digest: string)                          -> The `## Summary` block from the Hub (aiSummary).
- * @params: (sinceLastCommit?: SinceLastCommit|null)  -> Optional Hub delta; rendered above the digest.
+ * @params: (rawComment: string) -> Full deterministic comment from renderComment.
+ * @params: (digest: string)     -> The `## Summary` block from the Hub (aiSummary).
  * @returns: string — the composed, concise comment. The COMMENT_MARKER stays the first line.
  */
-export function composeWithDigest(
-  rawComment: string,
-  digest: string,
-  sinceLastCommit?: SinceLastCommit | null,
-): string {
+export function composeWithDigest(rawComment: string, digest: string): string {
   const block = digest.trim();
-  const delta = sinceLastCommit ? buildDeltaBlock(sinceLastCommit) : '';
   const sep = '\n---\n';
   const i = rawComment.indexOf(sep);
 
   if (i === -1) {
     // No section divider (empty-blast comment): nothing heavy to collapse, so
     // never introduce a `---` divider or a `<details>` "📋 Full report" expander
-    // this comment never had. The delta goes after the marker/header, above the
-    // digest. When delta === '' AND there is no usable digest, this whole path
-    // is skipped by the caller (main.ts) so today's byte-output is preserved;
-    // when only a digest is present we keep today's append-the-digest layout.
-    if (delta === '') {
-      return `${rawComment.trimEnd()}\n\n---\n\n${block}\n`;
-    }
-    // Marker must remain the first line: split it off and insert the delta after
-    // it, then the original remainder, then the digest (if any) at the bottom.
-    const nl = rawComment.indexOf('\n');
-    const markerLine = nl === -1 ? rawComment.trimEnd() : rawComment.slice(0, nl).trimEnd();
-    const remainder = nl === -1 ? '' : rawComment.slice(nl + 1).trim();
-    const head = remainder.length > 0 ? `${markerLine}\n\n${delta}\n${remainder}` : `${markerLine}\n\n${delta}`;
-    return block.length > 0 ? `${head.trimEnd()}\n\n---\n\n${block}\n` : `${head.trimEnd()}\n`;
+    // this comment never had. Keep today's append-the-digest layout so the
+    // byte-output is preserved.
+    return `${rawComment.trimEnd()}\n\n---\n\n${block}\n`;
   }
 
   // Split at the first divider: head = marker/header/verdict/metrics, rest =
-  // all the detail sections. Rebuild as head → delta → Summary → one collapsed
-  // expander. The delta block sits ABOVE the `## Summary` digest so the reviewer
-  // sees the latest change first.
+  // all the detail sections. Rebuild as head → Summary → one collapsed expander.
   const head = rawComment.slice(0, i).trimEnd();
   const rest = rawComment.slice(i + sep.length).trim();
   const summary = buildDetailSummary(rawComment);
-  // Delta-only sub-case (empty digest): emit the delta with NO `## Summary`
-  // header and no digest splice — just head → delta → collapsed expander.
-  const middle = block === '' ? delta.trimEnd() : `${delta}\n${block}`;
   return (
-    `${head}\n\n${middle}\n\n---\n\n` +
+    `${head}\n\n${block}\n\n---\n\n` +
     `<details>\n<summary><b>${summary}</b></summary>\n\n${rest}\n\n</details>\n`
   );
+}
+
+/** Per-SHA marker prefix for the standalone since-last-commit comment. */
+const SINCE_COMMIT_MARKER_PREFIX = '<!-- gitnexus-since-commit:';
+
+/**
+ * @brief: Build the per-SHA HTML-comment marker that identifies a single
+ *         "🔁 Since last commit" comment for upsert-by-marker. A distinct
+ *         headSha yields a distinct marker (a new comment); the same headSha
+ *         yields the same marker (an in-place update on re-run). main.ts and
+ *         the tests share this one definition so the scheme stays consistent.
+ *
+ * @params: (headSha: string) -> The PR head commit sha this delta is anchored to.
+ *
+ * @returns: string — `<!-- gitnexus-since-commit:<headSha> -->`.
+ */
+export function sinceCommitMarker(headSha: string): string {
+  return `${SINCE_COMMIT_MARKER_PREFIX}${headSha} -->`;
+}
+
+/**
+ * @brief: Render the full body of the standalone "🔁 Since last commit" comment.
+ *         The body begins with the per-SHA marker line (so postOrUpdateComment
+ *         can upsert by it), followed by the delta block. The `summary` is
+ *         Hub-generated prose (same trust level as the aiSummary digest) and is
+ *         spliced as-is — the renderer escapes nothing here, matching how the
+ *         digest is treated. Anchored on the full `headSha` in the marker; the
+ *         visible header shows the 7-char short sha.
+ *
+ * @params: (sinceLastCommit: SinceLastCommit) -> Hub delta (headSha + summary).
+ *
+ * @returns: string — marker line, blank line, then the delta block.
+ */
+export function renderSinceCommitComment(sinceLastCommit: SinceLastCommit): string {
+  return `${sinceCommitMarker(sinceLastCommit.headSha)}\n\n${buildDeltaBlock(sinceLastCommit)}`;
 }
 
 /**

@@ -204,7 +204,57 @@ describe('main — happy path', () => {
     expect(body).not.toContain('## 🔁 Since last commit');
   });
 
-  it('splices the since-last-commit delta into the posted body when present (no aiSummary)', async () => {
+  it('posts a SEPARATE per-SHA comment for the since-last-commit delta; main comment carries no delta', async () => {
+    resolveSpy.mockResolvedValue('repo-uuid');
+    refreshSpy.mockResolvedValue(undefined);
+    const blastRaw = loadFullBlast();
+    const { isBlastResult, normalizeBlastResult } = await import('../src/types/blast-result');
+    if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
+    const blast = normalizeBlastResult(blastRaw);
+    const headSha = 'a1b2c3d4e5f6a1b2c3d4';
+    blast.sinceLastCommit = { headSha, summary: 'reworked the parser' };
+    getBlastSpy.mockResolvedValue(blast);
+    postSpy.mockResolvedValue({ commentId: 1, action: 'created' });
+
+    const { main } = await import('../src/main');
+    const { sinceCommitMarker } = await import('../src/slm-format');
+    await main();
+
+    // Two posts: [0] main comment under v1 marker, [1] standalone per-SHA comment.
+    expect(postSpy).toHaveBeenCalledTimes(2);
+
+    const mainCall = postSpy.mock.calls[0][0] as { marker: string; body: string };
+    expect(mainCall.marker).toBe('<!-- gitnexus-review-v1 -->');
+    expect(mainCall.body).not.toContain('## 🔁 Since last commit');
+    expect(mainCall.body).not.toContain('gitnexus-since-commit');
+
+    const sinceCall = postSpy.mock.calls[1][0] as { marker: string; body: string };
+    expect(sinceCall.marker).toBe(sinceCommitMarker(headSha));
+    expect(sinceCall.body).toContain(sinceCommitMarker(headSha));
+    expect(sinceCall.body).toContain('## 🔁 Since last commit (`a1b2c3d`)');
+    expect(sinceCall.body).toContain('reworked the parser');
+
+    // comment-id output stays the MAIN comment id.
+    expect(outputs['comment-id']).toBe('1');
+  });
+
+  it('does not post a second comment when sinceLastCommit is absent', async () => {
+    resolveSpy.mockResolvedValue('repo-uuid');
+    refreshSpy.mockResolvedValue(undefined);
+    const blastRaw = loadFullBlast();
+    const { isBlastResult, normalizeBlastResult } = await import('../src/types/blast-result');
+    if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
+    const blast = normalizeBlastResult(blastRaw); // no sinceLastCommit
+    getBlastSpy.mockResolvedValue(blast);
+    postSpy.mockResolvedValue({ commentId: 1, action: 'created' });
+
+    const { main } = await import('../src/main');
+    await main();
+
+    expect(postSpy).toHaveBeenCalledOnce();
+  });
+
+  it('a thrown secondary-comment post does NOT fail the run; gate/outputs unaffected', async () => {
     resolveSpy.mockResolvedValue('repo-uuid');
     refreshSpy.mockResolvedValue(undefined);
     const blastRaw = loadFullBlast();
@@ -213,15 +263,19 @@ describe('main — happy path', () => {
     const blast = normalizeBlastResult(blastRaw);
     blast.sinceLastCommit = { headSha: 'a1b2c3d4e5f6a1b2c3d4', summary: 'reworked the parser' };
     getBlastSpy.mockResolvedValue(blast);
-    postSpy.mockResolvedValue({ commentId: 1, action: 'created' });
+    // First call (main comment) succeeds; second call (since-commit) throws.
+    postSpy
+      .mockResolvedValueOnce({ commentId: 4242, action: 'created' })
+      .mockRejectedValueOnce(new Error('secondary boom'));
 
     const { main } = await import('../src/main');
     await main();
 
-    const body = (postSpy.mock.calls[0][0] as { body: string }).body;
-    expect(body).toContain('## 🔁 Since last commit (`a1b2c3d`)');
-    expect(body).toContain('reworked the parser');
-    expect(body).not.toContain('## Summary'); // no digest present
+    expect(postSpy).toHaveBeenCalledTimes(2);
+    expect(setFailedSpy).not.toHaveBeenCalled();
+    // comment-id output remains the MAIN comment id.
+    expect(outputs['comment-id']).toBe('4242');
+    expect(outputs['gate-decision']).toBe('neutral');
   });
 });
 

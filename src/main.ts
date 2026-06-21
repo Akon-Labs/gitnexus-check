@@ -19,7 +19,7 @@ import {
 import { renderComment, COMMENT_MARKER } from './render-comment';
 import { asIssueCommentsClient, postOrUpdateComment } from './post-comment';
 import { parseThreshold, evaluateGate } from './gate';
-import { composeWithDigest } from './slm-format';
+import { composeWithDigest, renderSinceCommitComment, sinceCommitMarker } from './slm-format';
 
 /**
  * @brief: Top-level orchestration. Sequence:
@@ -31,7 +31,9 @@ import { composeWithDigest } from './slm-format';
  *           6. renderComment  → markdown ≤ CHAR_BUDGET.
  *           6b. aiSummary     → if the Hub returned a digest, splice it on top
  *                               and collapse detail; else post (6) unchanged.
- *           7. postOrUpdate   → Octokit upsert by marker.
+ *           7. postOrUpdate   → Octokit upsert by marker (MAIN comment).
+ *           6c. sinceLastCommit → if present, post a SEPARATE per-SHA comment;
+ *                               best-effort, never fails the run.
  *           8. setOutput      → comment-id, blast-level, gate-decision.
  *           9. evaluateGate   → setFailed iff blast level meets/exceeds threshold.
  *
@@ -102,17 +104,14 @@ export async function main(): Promise<void> {
   const rawBody = renderComment(blast, { prNumber, hubUrl });
 
   // ── 6b. If the Hub produced an LLM summary digest (it holds the Azure key
-  //        and rate-limits the call) and/or a "since last commit" delta (a PR
-  //        re-push), splice them into the SAME upsert-by-marker comment: delta
-  //        above the digest, detail collapsed beneath. When NEITHER is present,
+  //        and rate-limits the call), splice it into the upsert-by-marker MAIN
+  //        comment and collapse detail beneath it. When no digest is present,
   //        composeWithDigest is not called and the body is byte-identical to the
-  //        deterministic comment. The Action makes no LLM call of its own.
+  //        deterministic comment. The since-last-commit delta is NOT part of the
+  //        main comment — it is posted separately below. The Action makes no LLM
+  //        call of its own.
   const hasDigest = typeof blast.aiSummary === 'string' && blast.aiSummary.trim().length > 0;
-  const hasDelta = blast.sinceLastCommit != null;
-  const body =
-    hasDigest || hasDelta
-      ? composeWithDigest(rawBody, blast.aiSummary ?? '', blast.sinceLastCommit ?? undefined)
-      : rawBody;
+  const body = hasDigest ? composeWithDigest(rawBody, blast.aiSummary ?? '') : rawBody;
 
   let posted;
   try {
@@ -132,6 +131,31 @@ export async function main(): Promise<void> {
   core.setOutput('comment-id', String(posted.commentId));
   core.setOutput('blast-level', blast.blastLevel);
   core.info(`Comment ${posted.action} (id=${posted.commentId}); blast=${blast.blastLevel}.`);
+
+  // ── 6c. Best-effort: when the Hub returned a "since last commit" delta (a PR
+  //        re-push), post it as a SEPARATE standalone comment keyed on a per-SHA
+  //        marker. Same-SHA re-runs update that one comment (no duplicate); a new
+  //        commit (new SHA → new marker) creates a fresh comment, building a
+  //        per-commit history in the thread. This is additive: a failure here is
+  //        swallowed via classifyError so it can NEVER fail the run, change the
+  //        comment-id output, or affect the gate — the main review is the contract.
+  const delta = blast.sinceLastCommit;
+  if (delta != null) {
+    try {
+      const octokit = github.getOctokit(githubToken);
+      const sincePosted = await postOrUpdateComment({
+        client: asIssueCommentsClient(octokit),
+        owner,
+        repo,
+        prNumber,
+        marker: sinceCommitMarker(delta.headSha),
+        body: renderSinceCommitComment(delta),
+      });
+      core.info(`Since-last-commit comment ${sincePosted.action} (id=${sincePosted.commentId}).`);
+    } catch (err) {
+      core.warning(`since-last-commit comment skipped: ${classifyError(err, 'github')}`);
+    }
+  }
 
   // ── 9. Gate — the only success-path setFailed, evaluated after the
   //        comment is posted so reviewers always have the report.
