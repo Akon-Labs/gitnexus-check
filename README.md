@@ -1,77 +1,100 @@
 <div align="center">
 
-<img src=".github/assets/akonlabs-logo.png" alt="Akon Labs" width="120" />
+<img src=".github/assets/gitnexus-check-header-clear.png" alt="Akon Labs - gitnexus check" width="360" />
 
-# gitnexus-check
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?logo=discord&logoColor=white)](https://discord.gg/SrEf6KXjA)
 
-**A GitHub Action that posts a graph-aware review comment on every pull request.**
+**Deterministic pull request reviews powered by graph intelligence, not guesswork.**
 
 </div>
 
 ---
 
-
 ## What it is
 
-`gitnexus-check` runs on every PR, asks the GitNexus Hub what the change touches and
-who depends on it, then posts a single comment with the result. The comment updates
-in place when you push more commits.
+`gitnexus-check` gives every pull request a precise, data backed review instead of a
+guess. It runs against the GitNexus Hub, an enterprise knowledge graph of your codebase
+built from parsed symbols, call chains, and dependency relationships, so it knows
+exactly what a change touches and who depends on it before your team has to find out the
+hard way. The comment updates in place as new commits land, so the review is always
+current.
+
+Requires a GitNexus Hub account and a `GNX_TOKEN`.
+
+[![Get your GNX_TOKEN](https://img.shields.io/badge/Get%20your%20GNX__TOKEN-akonlabs.com-34D399)](https://akonlabs.com)
 
 ## What you get in the comment
 
-- **Verdict headline**: the blast level plus a one-line rationale (dependent-symbol count,
+Every section below is computed from the graph, not guessed by a language model:
+
+- **Verdict headline**: the blast level plus a one-line reason (dependent-symbol count,
   modules touched, flows affected, and a "review carefully" note when the level is high).
-- **Blast level** for the PR: `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`.
+- **Blast level**: `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`.
 - **Architecture impact**: which modules of your codebase are touched, ranked by hit count.
-- **Affected flows**: the execution flows (processes) the change reaches, ranked by hits.
+- **Affected flows**: the execution flows the change reaches, ranked by hits.
 - **Blast radius**: direct, indirect, and transitive callers of the symbols you changed.
 - **Symbol changes**: every function, class, or type the PR adds, modifies, or removes.
-- **API surface**: routes, exports, and signatures that moved (the stuff your consumers see).
-- **Changed files**: every file in the diff with its status (added / modified / removed).
+- **API surface**: routes, exports, and signatures that moved.
+- **Changed files**: every file in the diff with its status (added, modified, removed).
 - **File risk**: non-graph files (migrations, CI, infra, config) flagged by risk category.
 
-Sections render only when they have data — a docs-only PR won't show a Blast Radius table.
+Sections only render when they have data. A docs-only PR won't show a Blast Radius table.
 
-GNX_TOKEN can be Acquired [here](https://app.akonlabs.com/)
+> [!NOTE]
+> When enabled on the Hub, the comment leads with a short AI generated summary, with the
+> full graph based report collapsed underneath.
+>
+> No extra setup on your end. It just appears once the Hub has it turned on.
 
-## How to use it
+## Quick Start
+
+### 1. Install the CLI and link your account
 
 ```bash
 npm install -g gitnexushub
-gnx connect {GITNEXUS_TOKEN} --editor {editor}
+gnx connect {GNX_TOKEN}
 ```
 
---editor parameters
-Cursor
+Generate `GNX_TOKEN` from your profile at [akonlabs.com](https://akonlabs.com).
+
+> [!NOTE]
+> `gnx connect` saves the token locally.
+>
+> With `--editor cursor|windsurf|claude-code|opencode`, it can also wire up MCP for your
+> local coding assistant. That part is optional and separate from CI setup.
+
+### 2. Index your repo
+
+Your repo needs to be indexed on the GitNexus Hub before this action can review anything.
+Do it through the web UI at [app.akonlabs.com](https://app.akonlabs.com/), or from the CLI:
+
 ```bash
-gnx connect {GITNEXUS_TOKEN} --editor cursor
+gnx index owner/repo
 ```
 
-Windsurf
+### 3. Set up the workflow
+
+**Automated (recommended):** from inside your repo, with the [GitHub CLI](https://cli.github.com/)
+(`gh`) installed and authenticated:
+
 ```bash
-gnx connect {GITNEXUS_TOKEN} --editor windsurf
+gnx install-ci
 ```
 
-Claude Code
-```bash
-gnx connect {GITNEXUS_TOKEN} --editor claude-code
-```
+This detects your repo, mints a CI token, and opens a pull request that adds
+`.github/workflows/gitnexus.yml` and sets the required repo secret for you. Review and merge
+the PR to enable it.
 
-OpenCode
-```bash
-gnx connect {GITNEXUS_TOKEN} --editor opencode
-```
+**Manual:** if you'd rather not use `gh`, add the secret and workflow file yourself.
 
+Add `GNX_TOKEN` as a repo secret:
 
-## To get started
-1) Create a gitnexus.yml file in your repo,
-2) Ensure the repo is indexed on either app.akonlabs.com or via the gitnexushub cli -> [Find out more here](https://akonlabs.com)
-3) Create PR on the branch specified in the list in `.github/workflows/gitnexus.yml`
+**Settings → Secrets and variables → Actions → New repository secret**
 
-## Example `.github/workflows/gitnexus.yml`
+Then create `.github/workflows/gitnexus.yml`:
 
 ```yaml
-# managed by gitnexus-cli
 name: GitNexus
 
 on:
@@ -89,69 +112,82 @@ jobs:
       - uses: Akon-Labs/gitnexus-check@release
         with:
           hub-url: https://gitnexus-enterprise-staging.up.railway.app
-          token: ${{ secrets.GITNEXUS_TOKEN }}
+          token: ${{ secrets.GNX_TOKEN }}
 ```
 
-Use that for an example in your`.github/workflows/gitnexus.yml` and add to the branch you want to have the action.
+Open a PR and the comment shows up.
 
-Then add `GITNEXUS_TOKEN` as a repo secret in GitHub:
+## Configuration
 
-**Settings → Secrets and variables → Actions → New repository secret**
-
-Generate the token from your profile at [akonlabs.com](https://akonlabs.com), paste it,
-save. Open a PR and the comment shows up.
-
-## Inputs
+### Inputs
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `hub-url` | yes | — | GitNexus Hub base URL (e.g. `https://app.akonlabs.com`). |
-| `token` | yes | — | GitNexus CI token (`gnx_…`). Store as a repo secret and pass it in. |
+| `hub-url` | yes | none | GitNexus Hub base URL (e.g. `https://app.akonlabs.com`). |
+| `token` | yes | none | GitNexus CI token (`gnx_...`). Store as a repo secret. |
 | `github-token` | no | `${{ github.token }}` | Token used to post the PR comment. |
 | `fail-on-blast-level` | no | `''` (off) | Optional merge gate. See below. |
 
-> The comment may include a concise LLM **Summary** digest at the top (with the
-> full report collapsed below). That summary is generated by the GitNexus Hub —
-> there is **no Action input or token to configure**; it appears automatically
-> when the Hub has it enabled, and the comment falls back to the standard
-> deterministic format otherwise.
-
-## Outputs
+### Outputs
 
 | Output | Description |
 |--------|-------------|
 | `comment-id` | The GitHub comment id created or updated. |
-| `blast-level` | The PR blast level: `LOW` \| `MEDIUM` \| `HIGH` \| `CRITICAL`. |
-| `gate-decision` | `pass` \| `fail` \| `neutral`. `neutral` means advisory (no gate set). |
+| `blast-level` | The PR blast level: `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`. |
+| `gate-decision` | `pass`, `fail`, or `neutral`. `neutral` means advisory (no gate set). |
 
-## Optional: the merge gate (`fail-on-blast-level`)
+### The merge gate (`fail-on-blast-level`)
 
-By default the action is **advisory** — it always posts the comment and the check stays
-green. Set `fail-on-blast-level` to turn it into a **gate** that fails the workflow when
-the PR's blast level meets or exceeds your threshold. The comment is always posted first,
-so a red check always has an explanation attached.
+By default the action is advisory. It always posts the comment and the check stays green.
+Set `fail-on-blast-level` to turn it into a gate that fails the workflow when the PR's
+blast level meets or exceeds your threshold. The comment is always posted first, so a red
+check always has an explanation attached.
 
 ```yaml
 - uses: Akon-Labs/gitnexus-check@release
   with:
     hub-url: https://gitnexus-enterprise-staging.up.railway.app
-    token: ${{ secrets.GITNEXUS_TOKEN }}
-    fail-on-blast-level: CRITICAL   # block only on CRITICAL; omit for advisory
+    token: ${{ secrets.GNX_TOKEN }}
+    fail-on-blast-level: CRITICAL   # block only on CRITICAL, omit for advisory
 ```
 
-Threshold is **meets-or-exceeds**: `fail-on-blast-level: HIGH` fails on both `HIGH` and
-`CRITICAL`. Accepted values are `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` (case-sensitive); an
-empty value (the default) keeps the action advisory.
+Threshold is meets-or-exceeds: `fail-on-blast-level: HIGH` fails on both `HIGH` and
+`CRITICAL`. Accepted values are `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` (case-sensitive). An
+empty value keeps the action advisory.
 
-To make the gate actually block merges, mark the GitNexus check as **required** in your
-branch protection rules (**Settings → Branches → Branch protection rules**).
+> [!NOTE]
+> To make the gate block merges, mark the GitNexus check as required in your branch
+> protection rules (**Settings → Branches → Branch protection rules**).
 
+## How it works
+
+<div align="center">
+<img src=".github/assets/flow-diagram.svg" alt="gitnexus-check request flow" width="900" />
+</div>
+
+The action itself is a thin client. It opens a PR event, makes three calls to the Hub,
+renders the result, and posts the comment. All the graph analysis happens on the Hub side
+and isn't shown here.
+
+## Support
+
+Found a bug or need help? Open an issue on this repo, or reach out at
+[akonlabs.com](https://akonlabs.com).
+
+## Contributing
+
+Raise an issue first, fork the repo, then open a pull request from your fork into the
+`dev` branch. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
 
 <div align="center">
 
 <img src=".github/assets/akonlabs-logo.png" alt="Akon Labs" width="60" />
 
 Made by [Akon Labs](https://akonlabs.com).
-Powered by [GitNexus](https://github.com/abhigyanpatwari/GitNexus).
+Built on [GitNexus](https://akonlabs.com).
 
 </div>

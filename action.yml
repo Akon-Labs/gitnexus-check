@@ -6,7 +6,7 @@ inputs:
     description: 'GitNexus Hub base URL (e.g. https://app.akonlabs.com). Required, no default, so users cannot accidentally hit a wrong server.'
     required: true
   token:
-    description: 'GitNexus CI token (gnx_...). Store as a repo secret (e.g. GITNEXUS_TOKEN) and pass via the workflow.'
+    description: 'GitNexus CI token (gnx_...). Store as a repo secret (e.g. GNX_TOKEN) and pass via the workflow.'
     required: true
   github-token:
     description: 'GitHub token used to post the PR comment. Defaults to the auto-issued workflow token.'

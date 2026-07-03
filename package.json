@@ -2,6 +2,7 @@
   "name": "@gitnexus/check-action",
   "version": "1.0.0",
   "private": true,
+  "license": "MIT",
   "description": "GitNexus PR review — calls the GitNexus Hub blast-radius endpoints and posts a markdown comment on the PR.",
   "scripts": {
     "build": "ncc build src/main.ts -o dist --license licenses.txt",

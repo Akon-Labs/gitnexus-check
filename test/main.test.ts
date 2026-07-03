@@ -201,7 +201,7 @@ describe('main — happy path', () => {
 
     const body = (postSpy.mock.calls[0][0] as { body: string }).body;
     expect(body).toBe(expected);
-    expect(body).not.toContain('## 🔁 Since last commit');
+    expect(body).not.toContain('## Commit `');
   });
 
   it('posts a SEPARATE per-SHA comment for the since-last-commit delta; main comment carries no delta', async () => {
@@ -225,13 +225,13 @@ describe('main — happy path', () => {
 
     const mainCall = postSpy.mock.calls[0][0] as { marker: string; body: string };
     expect(mainCall.marker).toBe('<!-- gitnexus-review-v1 -->');
-    expect(mainCall.body).not.toContain('## 🔁 Since last commit');
+    expect(mainCall.body).not.toContain('## Commit `');
     expect(mainCall.body).not.toContain('gitnexus-since-commit');
 
     const sinceCall = postSpy.mock.calls[1][0] as { marker: string; body: string };
     expect(sinceCall.marker).toBe(sinceCommitMarker(headSha));
     expect(sinceCall.body).toContain(sinceCommitMarker(headSha));
-    expect(sinceCall.body).toContain('## 🔁 Since last commit (`a1b2c3d`)');
+    expect(sinceCall.body).toContain('## Commit `a1b2c3d` summary');
     expect(sinceCall.body).toContain('reworked the parser');
 
     // comment-id output stays the MAIN comment id.
