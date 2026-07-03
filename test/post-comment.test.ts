@@ -140,7 +140,7 @@ describe('postOrUpdateComment — update path', () => {
 
 describe('postOrUpdateComment — per-SHA since-commit marker idempotency', () => {
   const SHA_MARKER = '<!-- gitnexus-since-commit:a1b2c3d4e5f6 -->';
-  const SHA_BODY = `${SHA_MARKER}\n\n## 🔁 Since last commit (\`a1b2c3d\`)\nreworked it`;
+  const SHA_BODY = `${SHA_MARKER}\n\n## Commit \`a1b2c3d\` summary\nreworked it`;
 
   it('creates a new comment when the per-SHA marker is not present (new commit)', async () => {
     const { client, spies } = makeClient({

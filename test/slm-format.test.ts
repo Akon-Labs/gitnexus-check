@@ -103,14 +103,14 @@ describe('composeWithDigest', () => {
 describe('composeWithDigest — main comment carries NO since-last-commit delta', () => {
   it('the digest-spliced main comment never contains the delta block', () => {
     const out = composeWithDigest(rawComment(), DIGEST);
-    expect(out).not.toContain('## 🔁 Since last commit');
+    expect(out).not.toContain('## Commit `');
     expect(out).not.toContain('gitnexus-since-commit');
   });
 
   it('the empty-blast main comment never contains the delta block', () => {
     const empty = `${MARKER}\n\n### GitNexus Review · PR #7\n\nNo impact detected.`;
     const out = composeWithDigest(empty, DIGEST);
-    expect(out).not.toContain('## 🔁 Since last commit');
+    expect(out).not.toContain('## Commit `');
   });
 });
 
@@ -127,20 +127,20 @@ describe('renderSinceCommitComment — standalone per-commit comment', () => {
   it('contains the delta block (short sha header) and the verbatim summary', () => {
     const out = renderSinceCommitComment(DELTA);
     // shortSha truncation: 40-char sha → 7-char in the visible header.
-    expect(out).toContain('## 🔁 Since last commit (`a1b2c3d`)');
+    expect(out).toContain('## Commit `a1b2c3d` summary');
     expect(out).toContain('🔁 Fixed the null guard in `parse()`.');
   });
 
   it('the marker (full sha) appears before the visible short-sha header', () => {
     const out = renderSinceCommitComment(DELTA);
     expect(out.indexOf(sinceCommitMarker(SHA40))).toBeLessThan(
-      out.indexOf('## 🔁 Since last commit'),
+      out.indexOf('## Commit `'),
     );
   });
 
   it('shortSha truncates a 40-char sha to 7 and passes a short string through', () => {
-    expect(renderSinceCommitComment({ headSha: SHA40, summary: 's' })).toContain('(`a1b2c3d`)');
-    expect(renderSinceCommitComment({ headSha: 'abc12', summary: 's' })).toContain('(`abc12`)');
+    expect(renderSinceCommitComment({ headSha: SHA40, summary: 's' })).toContain('`a1b2c3d` summary');
+    expect(renderSinceCommitComment({ headSha: 'abc12', summary: 's' })).toContain('`abc12` summary');
   });
 });
 

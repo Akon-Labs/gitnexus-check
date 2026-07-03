@@ -1,6 +1,6 @@
 /**
  * @brief: Compose the Hub-provided `aiSummary` digest into the deterministic
- *         PR comment, and render the standalone "🔁 Since last commit" comment.
+ *         PR comment, and render the standalone "Commit summary" comment.
  *         The LLM call itself lives on the GitNexus Hub (which holds the Azure
  *         credential and rate-limits the call) — the Action no longer talks to
  *         Azure. The Hub returns a ready-made `## Summary` block on the
@@ -59,7 +59,7 @@ const SINCE_COMMIT_MARKER_PREFIX = '<!-- gitnexus-since-commit:';
 
 /**
  * @brief: Build the per-SHA HTML-comment marker that identifies a single
- *         "🔁 Since last commit" comment for upsert-by-marker. A distinct
+ *         "Commit summary" comment for upsert-by-marker. A distinct
  *         headSha yields a distinct marker (a new comment); the same headSha
  *         yields the same marker (an in-place update on re-run). main.ts and
  *         the tests share this one definition so the scheme stays consistent.
@@ -73,7 +73,7 @@ export function sinceCommitMarker(headSha: string): string {
 }
 
 /**
- * @brief: Render the full body of the standalone "🔁 Since last commit" comment.
+ * @brief: Render the full body of the standalone "Commit summary" comment.
  *         The body begins with the per-SHA marker line (so postOrUpdateComment
  *         can upsert by it), followed by the delta block. The `summary` is
  *         Hub-generated prose (same trust level as the aiSummary digest) and is
@@ -99,13 +99,13 @@ function shortSha(sha: string): string {
 }
 
 /**
- * @brief: Render the "🔁 Since last commit" delta block. The `summary` is
+ * @brief: Render the "Commit summary" delta block. The `summary` is
  *         Hub-generated prose (same trust level as the aiSummary digest) and is
  *         spliced as-is — the renderer escapes nothing here, matching how the
  *         digest is treated. Ends with a single trailing newline.
  */
 function buildDeltaBlock(d: SinceLastCommit): string {
-  return `## 🔁 Since last commit (\`${shortSha(d.headSha)}\`)\n${d.summary}\n`;
+  return `## Commit \`${shortSha(d.headSha)}\` summary\n${d.summary}\n`;
 }
 
 /**
