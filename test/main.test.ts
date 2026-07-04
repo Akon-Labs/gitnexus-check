@@ -311,7 +311,7 @@ describe('main — Hub error path', () => {
     const { main } = await import('../src/main');
     await main();
     const msg = setFailedSpy.mock.calls[0][0] as string;
-    expect(msg).toContain('GNX_TOKEN is invalid or revoked');
+    expect(msg).toContain('GITNEXUS_TOKEN is invalid or revoked');
   });
 });
 
@@ -456,7 +456,7 @@ describe('main — head sha anchor (readHeadSha)', () => {
 });
 
 describe('main — token safety', () => {
-  it('does not leak the GNX_TOKEN into any setFailed / warning / error call', async () => {
+  it('does not leak the GITNEXUS_TOKEN into any setFailed / warning / error call', async () => {
     inputs['token'] = 'gnx_secret_VERY_DO_NOT_LEAK';
     resolveSpy.mockRejectedValue(
       new Error('boom with token leak gnx_secret_VERY_DO_NOT_LEAK in message'),

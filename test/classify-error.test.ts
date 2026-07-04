@@ -30,7 +30,7 @@ function axiosErr(opts: {
 describe('classifyError — Hub context', () => {
   it('401 → invalid/revoked token', () => {
     expect(classifyError(axiosErr({ status: 401 }), 'hub')).toBe(
-      'GNX_TOKEN is invalid or revoked. Regenerate at <hub>/profile.',
+      'GITNEXUS_TOKEN is invalid or revoked. Regenerate at <hub>/profile.',
     );
   });
 
@@ -42,7 +42,7 @@ describe('classifyError — Hub context', () => {
 
   it('403 generic → repo access', () => {
     expect(classifyError(axiosErr({ status: 403, data: { error: 'Forbidden' } }), 'hub')).toBe(
-      'GNX_TOKEN does not have access to the requested repo on the Hub.',
+      'GITNEXUS_TOKEN does not have access to the requested repo on the Hub.',
     );
   });
 
