@@ -20,9 +20,9 @@ exactly what a change touches and who depends on it before your team has to find
 hard way. The comment updates in place as new commits land, so the review is always
 current.
 
-Requires a GitNexus Hub account and a `GNX_TOKEN`.
+Requires a GitNexus Hub account and a `GITNEXUS_TOKEN`.
 
-[![Get your GNX_TOKEN](https://img.shields.io/badge/Get%20your%20GNX__TOKEN-akonlabs.com-34D399)](https://akonlabs.com)
+[![Get your GITNEXUS_TOKEN](https://img.shields.io/badge/Get%20your%20GITNEXUS__TOKEN-akonlabs.com-34D399)](https://akonlabs.com)
 
 ## What you get in the comment
 
@@ -53,10 +53,10 @@ Sections only render when they have data. A docs-only PR won't show a Blast Radi
 
 ```bash
 npm install -g gitnexushub
-gnx connect {GNX_TOKEN}
+gnx connect {GITNEXUS_TOKEN}
 ```
 
-Generate `GNX_TOKEN` from your profile at [akonlabs.com](https://akonlabs.com).
+Generate `GITNEXUS_TOKEN` from your profile at [akonlabs.com](https://akonlabs.com).
 
 > [!NOTE]
 > `gnx connect` saves the token locally.
@@ -88,7 +88,7 @@ the PR to enable it.
 
 **Manual:** if you'd rather not use `gh`, add the secret and workflow file yourself.
 
-Add `GNX_TOKEN` as a repo secret:
+Add `GITNEXUS_TOKEN` as a repo secret:
 
 **Settings → Secrets and variables → Actions → New repository secret**
 
@@ -112,7 +112,7 @@ jobs:
       - uses: Akon-Labs/gitnexus-check@release
         with:
           hub-url: https://gitnexus-enterprise-staging.up.railway.app
-          token: ${{ secrets.GNX_TOKEN }}
+          token: ${{ secrets.GITNEXUS_TOKEN }}
 ```
 
 Open a PR and the comment shows up.
@@ -147,7 +147,7 @@ check always has an explanation attached.
 - uses: Akon-Labs/gitnexus-check@release
   with:
     hub-url: https://gitnexus-enterprise-staging.up.railway.app
-    token: ${{ secrets.GNX_TOKEN }}
+    token: ${{ secrets.GITNEXUS_TOKEN }}
     fail-on-blast-level: CRITICAL   # block only on CRITICAL, omit for advisory
 ```
 
