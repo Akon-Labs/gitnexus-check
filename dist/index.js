@@ -34285,7 +34285,7 @@ function wrappy (fn, cb) {
  *         into a stable user-visible string suitable for `core.error` +
  *         `core.setFailed` in main.ts. Never inspects header values, never
  *         dumps response bodies wholesale, and never returns the
- *         GNX_TOKEN — GitHub's secret masker is a fallback, not a primary
+ *         GITNEXUS_TOKEN — GitHub's secret masker is a fallback, not a primary
  *         defense.
  */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
@@ -34362,7 +34362,7 @@ function classifyStatus(status, context, err) {
     // Hub-side classifications
     if (context === 'hub') {
         if (status === 401) {
-            return 'GNX_TOKEN is invalid or revoked. Regenerate at <hub>/profile.';
+            return 'GITNEXUS_TOKEN is invalid or revoked. Regenerate at <hub>/profile.';
         }
         if (status === 402) {
             return 'Plan limit exceeded — upgrade at <hub>/billing.';
@@ -34374,7 +34374,7 @@ function classifyStatus(status, context, err) {
             if (reason && reason.toLowerCase().includes('device-fingerprint')) {
                 return 'Hub requires X-Device-Fingerprint header for this token — Action build is incomplete.';
             }
-            return 'GNX_TOKEN does not have access to the requested repo on the Hub.';
+            return 'GITNEXUS_TOKEN does not have access to the requested repo on the Hub.';
         }
         if (status === 404) {
             const url = err.config?.url ?? '';
