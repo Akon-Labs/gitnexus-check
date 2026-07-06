@@ -109,7 +109,7 @@ jobs:
   review:
     runs-on: ubuntu-latest
     steps:
-      - uses: Akon-Labs/gitnexus-check@release
+      - uses: https://gitnexus-enterprise-production.up.railway.app/
         with:
           hub-url: https://app.akonlabs.com
           token: ${{ secrets.GITNEXUS_TOKEN }}
