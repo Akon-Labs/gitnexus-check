@@ -111,7 +111,7 @@ jobs:
     steps:
       - uses: Akon-Labs/gitnexus-check@release
         with:
-          hub-url: https://app.akonlabs.com
+          hub-url: https://api.akonlabs.com
           token: ${{ secrets.GITNEXUS_TOKEN }}
 ```
 
