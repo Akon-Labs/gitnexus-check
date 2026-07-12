@@ -358,6 +358,33 @@ describe('main — GitHub error path', () => {
     expect(outputs['comment-id']).toBeUndefined();
   });
 
+  it('points a failed gate to the action log after a recovered 403 leaves no comment', async () => {
+    resolveSpy.mockResolvedValue('repo-uuid');
+    refreshSpy.mockResolvedValue(undefined);
+    const blastRaw = loadFullBlast();
+    const { isBlastResult, normalizeBlastResult } = await import(
+      '../src/types/blast-result'
+    );
+    if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
+    getBlastSpy.mockResolvedValue(normalizeBlastResult(blastRaw));
+    postSpy.mockRejectedValue({
+      isAxiosError: true,
+      response: { status: 403, statusText: '', headers: {} },
+      config: { url: 'https://api.github.com/repos/a/b/issues/1/comments' },
+    });
+    inputs['fail-on-blast-level'] = 'LOW';
+    parseThresholdSpy.mockReturnValue('LOW');
+    evaluateGateSpy.mockReturnValue('fail');
+
+    const { main } = await import('../src/main');
+    await main();
+
+    expect(setFailedSpy).toHaveBeenCalledOnce();
+    const msg = setFailedSpy.mock.calls[0][0] as string;
+    expect(msg).toContain('See action log.');
+    expect(msg).not.toContain('See PR comment.');
+  });
+
   it('still fails the run on a non-403 GitHub error (e.g. 500)', async () => {
     resolveSpy.mockResolvedValue('repo-uuid');
     refreshSpy.mockResolvedValue(undefined);
@@ -434,6 +461,8 @@ describe('main — gate', () => {
     expect(setFailedSpy).toHaveBeenCalledOnce();
     expect(postCallOrder).toBeGreaterThanOrEqual(0);
     expect(failCallOrder).toBeGreaterThan(postCallOrder);
+    const msg = setFailedSpy.mock.calls[0][0] as string;
+    expect(msg).toContain('See PR comment.');
   });
 
   it('invalid threshold: setFailed before any Hub call', async () => {
@@ -517,6 +546,8 @@ describe('main — fork PR (log-only mode)', () => {
     expect(setFailedSpy).toHaveBeenCalledOnce();
     const msg = setFailedSpy.mock.calls[0][0] as string;
     expect(msg).toContain('meets or exceeds threshold');
+    expect(msg).toContain('See action log.');
+    expect(msg).not.toContain('See PR comment.');
   });
 
   it('detects a fork whose head repo was deleted (head.repo === null)', async () => {
