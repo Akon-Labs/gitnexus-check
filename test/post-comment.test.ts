@@ -3,9 +3,19 @@ import { postOrUpdateComment, type IssueCommentsClient } from '../src/post-comme
 
 const MARKER = '<!-- gitnexus-review-v1 -->';
 const BODY_OK = `${MARKER}\n## hi`;
+// The author GitHub attaches to comments. `type: 'Bot'` is GitHub-set and
+// unforgeable, so it is what lets the poster tell its own comment from a
+// human-planted marker. `github-actions[bot]` is the default-token author.
+const BOT_USER = { login: 'github-actions[bot]', type: 'Bot' };
+
+type MockComment = {
+  id: number;
+  body?: string;
+  user?: { login?: string; type?: string } | null;
+};
 
 interface MockOpts {
-  pages?: Array<Array<{ id: number; body?: string }>>;
+  pages?: Array<Array<MockComment>>;
   createId?: number;
   updateId?: number;
   createImpl?: () => Promise<never>;
@@ -79,7 +89,7 @@ describe('postOrUpdateComment — create path', () => {
 describe('postOrUpdateComment — update path', () => {
   it('PATCHes when a marker-containing comment exists', async () => {
     const { client, spies } = makeClient({
-      pages: [[{ id: 1, body: 'random' }, { id: 77, body: `previous ${MARKER}` }]],
+      pages: [[{ id: 1, body: 'random' }, { id: 77, body: `previous ${MARKER}`, user: BOT_USER }]],
       updateId: 77,
     });
     const res = await postOrUpdateComment({
@@ -99,7 +109,7 @@ describe('postOrUpdateComment — update path', () => {
     const { client, spies } = makeClient({
       pages: [
         [{ id: 1, body: 'a' }, { id: 2, body: 'b' }],
-        [{ id: 3, body: 'c' }, { id: 4, body: `with ${MARKER} inside` }],
+        [{ id: 3, body: 'c' }, { id: 4, body: `with ${MARKER} inside`, user: BOT_USER }],
       ],
       updateId: 4,
     });
@@ -138,6 +148,110 @@ describe('postOrUpdateComment — update path', () => {
   });
 });
 
+describe('postOrUpdateComment — bot-identity filter', () => {
+  it('ignores a marker planted by a human user and creates a fresh comment', async () => {
+    // An attacker copies the public marker into their own comment to hijack the
+    // Action's slot. type: 'User' (GitHub-set) must exclude it from adoption.
+    const { client, spies } = makeClient({
+      pages: [[
+        { id: 660, body: `${MARKER}\nplanted by a human`, user: { login: 'attacker', type: 'User' } },
+      ]],
+      createId: 42,
+    });
+    const res = await postOrUpdateComment({
+      client,
+      owner: 'a',
+      repo: 'b',
+      prNumber: 7,
+      marker: MARKER,
+      body: BODY_OK,
+    });
+    expect(res).toEqual({ commentId: 42, action: 'created' });
+    expect(spies.createComment).toHaveBeenCalledOnce();
+    expect(spies.updateComment).not.toHaveBeenCalled();
+  });
+
+  it('adopts (PATCHes) a bot-authored marker comment', async () => {
+    const { client, spies } = makeClient({
+      pages: [[{ id: 77, body: `${MARKER}\nprior report`, user: BOT_USER }]],
+      updateId: 77,
+    });
+    const res = await postOrUpdateComment({
+      client,
+      owner: 'a',
+      repo: 'b',
+      prNumber: 7,
+      marker: MARKER,
+      body: BODY_OK,
+    });
+    expect(res).toEqual({ commentId: 77, action: 'updated' });
+    expect(spies.updateComment).toHaveBeenCalledOnce();
+    expect(spies.createComment).not.toHaveBeenCalled();
+  });
+
+  it('adopts a GitHub App installation bot comment (login "<app>[bot]", type Bot)', async () => {
+    // The github-token input may be an App installation token whose author is
+    // "<app-slug>[bot]", not github-actions[bot]. The [bot]-suffix match keeps
+    // the Action updating its own comment rather than duplicating it each run.
+    const { client, spies } = makeClient({
+      pages: [[
+        { id: 91, body: `${MARKER}\nprior report`, user: { login: 'gitnexus-app[bot]', type: 'Bot' } },
+      ]],
+      updateId: 91,
+    });
+    const res = await postOrUpdateComment({
+      client,
+      owner: 'a',
+      repo: 'b',
+      prNumber: 7,
+      marker: MARKER,
+      body: BODY_OK,
+    });
+    expect(res).toEqual({ commentId: 91, action: 'updated' });
+    expect(spies.updateComment).toHaveBeenCalledOnce();
+  });
+
+  it('skips a human-planted marker even when it precedes the real bot comment', async () => {
+    // Both carry the marker; the human decoy is listed first. Only the bot one
+    // may be adopted, so the poster must scan past the decoy to comment 77.
+    const { client, spies } = makeClient({
+      pages: [[
+        { id: 500, body: `${MARKER}\nhuman decoy`, user: { login: 'someone', type: 'User' } },
+        { id: 77, body: `${MARKER}\nreal bot report`, user: BOT_USER },
+      ]],
+      updateId: 77,
+    });
+    const res = await postOrUpdateComment({
+      client,
+      owner: 'a',
+      repo: 'b',
+      prNumber: 7,
+      marker: MARKER,
+      body: BODY_OK,
+    });
+    expect(res.commentId).toBe(77);
+    expect(spies.updateComment).toHaveBeenCalledOnce();
+    expect(spies.createComment).not.toHaveBeenCalled();
+  });
+
+  it('ignores a marker comment with a null author (ghost user)', async () => {
+    const { client, spies } = makeClient({
+      pages: [[{ id: 12, body: `${MARKER}\nauthorless`, user: null }]],
+      createId: 43,
+    });
+    const res = await postOrUpdateComment({
+      client,
+      owner: 'a',
+      repo: 'b',
+      prNumber: 7,
+      marker: MARKER,
+      body: BODY_OK,
+    });
+    expect(res).toEqual({ commentId: 43, action: 'created' });
+    expect(spies.createComment).toHaveBeenCalledOnce();
+  });
+});
+
 describe('postOrUpdateComment — per-SHA since-commit marker idempotency', () => {
   const SHA_MARKER = '<!-- gitnexus-since-commit:a1b2c3d4e5f6 -->';
   const SHA_BODY = `${SHA_MARKER}\n\n## Commit \`a1b2c3d\` summary\nreworked it`;
@@ -164,8 +278,8 @@ describe('postOrUpdateComment — per-SHA since-commit marker idempotency', () =
     const { client, spies } = makeClient({
       pages: [
         [
-          { id: 9, body: '<!-- gitnexus-review-v1 -->\nmain report' },
-          { id: 88, body: `previous ${SHA_MARKER} body` },
+          { id: 9, body: '<!-- gitnexus-review-v1 -->\nmain report', user: BOT_USER },
+          { id: 88, body: `previous ${SHA_MARKER} body`, user: BOT_USER },
         ],
       ],
       updateId: 88,
