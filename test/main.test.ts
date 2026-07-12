@@ -13,6 +13,7 @@ const inputs: Record<string, string> = {};
 const setFailedSpy = vi.fn();
 const warningSpy = vi.fn();
 const errorSpy = vi.fn();
+const infoSpy = vi.fn();
 
 vi.mock('@actions/core', () => ({
   getInput: vi.fn((name: string, opts?: { required?: boolean }) => {
@@ -24,7 +25,7 @@ vi.mock('@actions/core', () => ({
     outputs[name] = value;
   }),
   setFailed: setFailedSpy,
-  info: vi.fn(),
+  info: infoSpy,
   warning: warningSpy,
   error: errorSpy,
 }));
@@ -32,9 +33,15 @@ vi.mock('@actions/core', () => ({
 const ghContext = {
   eventName: 'pull_request',
   payload: {
+    // Absent by default (same-repo PR). Fork tests set repository + head.repo to
+    // exercise the fork precheck; beforeEach resets both.
+    repository: undefined as { full_name?: string } | undefined,
     pull_request: {
       number: 152,
-      head: { sha: undefined as unknown },
+      head: { sha: undefined as unknown } as {
+        sha: unknown;
+        repo?: { full_name?: string } | null;
+      },
     },
   },
   repo: { owner: 'Akon-Labs', repo: 'gitnexus-enterprise' },
@@ -105,11 +112,13 @@ beforeEach(() => {
   inputs['token'] = 'gnx_test';
   inputs['github-token'] = 'ghp_test';
   ghContext.eventName = 'pull_request';
+  ghContext.payload.repository = undefined;
   ghContext.payload.pull_request.number = 152;
   ghContext.payload.pull_request.head = { sha: undefined };
   setFailedSpy.mockReset();
   warningSpy.mockReset();
   errorSpy.mockReset();
+  infoSpy.mockReset();
   resolveSpy.mockReset();
   refreshSpy.mockReset();
   getBlastSpy.mockReset();
@@ -316,7 +325,7 @@ describe('main — Hub error path', () => {
 });
 
 describe('main — GitHub error path', () => {
-  it('classifies 403 from GitHub as missing permission', async () => {
+  it('degrades a 403 on the main comment to a loud error annotation (does not fail the run)', async () => {
     resolveSpy.mockResolvedValue('repo-uuid');
     refreshSpy.mockResolvedValue(undefined);
     const blastRaw = loadFullBlast();
@@ -334,8 +343,40 @@ describe('main — GitHub error path', () => {
 
     const { main } = await import('../src/main');
     await main();
+
+    // Defense in depth: a same-repo 403 (e.g. a Dependabot read-only token) is a
+    // loud error annotation, NOT a failure — the run continues to the gate so a
+    // restricted-token PR still gets its gate decision, while a genuine
+    // misconfiguration is surfaced prominently rather than as a missable warning.
+    const errors = errorSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(errors).toContain('missing pull-requests:write permission');
+    expect(errors).toContain('pull-requests: write');
+    expect(setFailedSpy).not.toHaveBeenCalled();
+    expect(outputs['blast-level']).toBe('LOW');
+    expect(outputs['gate-decision']).toBe('neutral');
+    // Nothing was posted, so no comment-id is emitted.
+    expect(outputs['comment-id']).toBeUndefined();
+  });
+
+  it('still fails the run on a non-403 GitHub error (e.g. 500)', async () => {
+    resolveSpy.mockResolvedValue('repo-uuid');
+    refreshSpy.mockResolvedValue(undefined);
+    const blastRaw = loadFullBlast();
+    const { isBlastResult, normalizeBlastResult } = await import('../src/types/blast-result');
+    if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
+    getBlastSpy.mockResolvedValue(normalizeBlastResult(blastRaw));
+    const err = {
+      isAxiosError: true,
+      response: { status: 500, statusText: '', headers: {} },
+      config: { url: 'https://api.github.com/repos/a/b/issues/1/comments' },
+    };
+    postSpy.mockRejectedValue(err);
+
+    const { main } = await import('../src/main');
+    await main();
+    expect(setFailedSpy).toHaveBeenCalledOnce();
     const msg = setFailedSpy.mock.calls[0][0] as string;
-    expect(msg).toContain('missing pull-requests:write permission');
+    expect(msg).toContain('postOrUpdateComment');
   });
 });
 
@@ -409,6 +450,113 @@ describe('main — gate', () => {
     expect(resolveSpy).not.toHaveBeenCalled();
     expect(refreshSpy).not.toHaveBeenCalled();
     expect(getBlastSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('main — fork PR (log-only mode)', () => {
+  async function setupHappy(): Promise<void> {
+    resolveSpy.mockResolvedValue('repo-uuid');
+    refreshSpy.mockResolvedValue(undefined);
+    const blastRaw = loadFullBlast();
+    const { isBlastResult, normalizeBlastResult } = await import('../src/types/blast-result');
+    if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
+    getBlastSpy.mockResolvedValue(normalizeBlastResult(blastRaw));
+    postSpy.mockResolvedValue({ commentId: 5555, action: 'created' });
+  }
+
+  function makeFork(): void {
+    ghContext.payload.repository = { full_name: 'Akon-Labs/gitnexus-enterprise' };
+    ghContext.payload.pull_request.head = {
+      sha: undefined,
+      repo: { full_name: 'attacker/gitnexus-enterprise' },
+    };
+  }
+
+  it('does NOT call the comment API and logs the rendered review instead', async () => {
+    await setupHappy();
+    makeFork();
+    const { main } = await import('../src/main');
+    await main();
+
+    // No GitHub write attempts at all on a fork.
+    expect(postSpy).not.toHaveBeenCalled();
+    // The rendered review is emitted into the step log so the analysis stays visible.
+    const logged = infoSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged).toContain('<!-- gitnexus-review-v1 -->');
+    expect(logged.toLowerCase()).toContain('fork pr detected');
+    // Hub calls ran exactly as for a same-repo PR.
+    expect(resolveSpy).toHaveBeenCalledOnce();
+    expect(refreshSpy).toHaveBeenCalledOnce();
+    expect(getBlastSpy).toHaveBeenCalledOnce();
+  });
+
+  it('still evaluates the gate; blast-level set, no comment-id, no failure', async () => {
+    await setupHappy();
+    makeFork();
+    const { main } = await import('../src/main');
+    await main();
+
+    expect(evaluateGateSpy).toHaveBeenCalledOnce();
+    expect(outputs['blast-level']).toBe('LOW');
+    expect(outputs['gate-decision']).toBe('neutral');
+    expect(outputs['comment-id']).toBeUndefined();
+    expect(setFailedSpy).not.toHaveBeenCalled();
+  });
+
+  it('the gate STILL fails the run on a fork when the blast level trips the threshold', async () => {
+    await setupHappy();
+    makeFork();
+    inputs['fail-on-blast-level'] = 'LOW';
+    parseThresholdSpy.mockReturnValue('LOW');
+    evaluateGateSpy.mockReturnValue('fail');
+    const { main } = await import('../src/main');
+    await main();
+
+    expect(postSpy).not.toHaveBeenCalled();
+    expect(outputs['gate-decision']).toBe('fail');
+    expect(setFailedSpy).toHaveBeenCalledOnce();
+    const msg = setFailedSpy.mock.calls[0][0] as string;
+    expect(msg).toContain('meets or exceeds threshold');
+  });
+
+  it('detects a fork whose head repo was deleted (head.repo === null)', async () => {
+    await setupHappy();
+    ghContext.payload.repository = { full_name: 'Akon-Labs/gitnexus-enterprise' };
+    ghContext.payload.pull_request.head = { sha: undefined, repo: null };
+    const { main } = await import('../src/main');
+    await main();
+
+    expect(postSpy).not.toHaveBeenCalled();
+    const logged = infoSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged.toLowerCase()).toContain('fork pr detected');
+  });
+
+  it('skips the since-last-commit comment on a fork (no writes at all)', async () => {
+    await setupHappy();
+    makeFork();
+    const blastRaw = loadFullBlast();
+    const { isBlastResult, normalizeBlastResult } = await import('../src/types/blast-result');
+    if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
+    const blast = normalizeBlastResult(blastRaw);
+    blast.sinceLastCommit = { headSha: 'a1b2c3d4e5f6a1b2c3d4', summary: 'reworked the parser' };
+    getBlastSpy.mockResolvedValue(blast);
+    const { main } = await import('../src/main');
+    await main();
+
+    expect(postSpy).not.toHaveBeenCalled();
+  });
+
+  it('a same-repo PR (head.repo.full_name === base) is NOT treated as a fork', async () => {
+    await setupHappy();
+    ghContext.payload.repository = { full_name: 'Akon-Labs/gitnexus-enterprise' };
+    ghContext.payload.pull_request.head = {
+      sha: undefined,
+      repo: { full_name: 'Akon-Labs/gitnexus-enterprise' },
+    };
+    const { main } = await import('../src/main');
+    await main();
+
+    expect(postSpy).toHaveBeenCalledOnce();
   });
 });
 

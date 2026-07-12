@@ -4,9 +4,23 @@
  *         and either PATCH the existing comment body or POST a new one.
  *         Token handling: the GITHUB_TOKEN flows through `@actions/github`
  *         via getOctokit and is never read, logged, or formatted here.
+ *         A comment is only adopted (PATCHed) when its author is a bot, so a
+ *         human commenter cannot plant the public marker to hijack or suppress
+ *         our comment slot (see isAdoptableBotComment).
  */
 
 import * as github from '@actions/github';
+
+/**
+ * @brief: The subset of an issue comment we read when scanning for our marker.
+ *         `user` carries the author identity GitHub sets (never client-supplied)
+ *         so we can tell our own bot comment from a human-planted lookalike.
+ */
+type ScannedComment = {
+  id: number;
+  body?: string;
+  user?: { login?: string; type?: string } | null;
+};
 
 /**
  * @brief: GitHub REST client surface area we depend on. We narrow Octokit
@@ -18,7 +32,7 @@ export interface IssueCommentsClient {
     iterator: (
       route: 'GET /repos/{owner}/{repo}/issues/{issue_number}/comments',
       params: { owner: string; repo: string; issue_number: number; per_page: number },
-    ) => AsyncIterable<{ data: Array<{ id: number; body?: string }> }>;
+    ) => AsyncIterable<{ data: Array<ScannedComment> }>;
   };
   rest: {
     issues: {
@@ -98,9 +112,12 @@ export async function postOrUpdateComment(opts: {
 }
 
 /**
- * @brief: Page through the PR's issue comments and return the id of the
- *         first comment whose body contains `marker`. Returns null if no
- *         match is found within MAX_PAGES.
+ * @brief: Page through the PR's issue comments and return the id of the first
+ *         comment we may safely adopt: one whose body contains `marker` AND
+ *         whose author is a bot (see isAdoptableBotComment). A marker planted by
+ *         a human is ignored so a commenter cannot hijack or suppress our
+ *         comment slot. Returns null if none is found within MAX_PAGES — the
+ *         caller then creates a fresh comment.
  */
 async function findExistingCommentId(opts: {
   client: IssueCommentsClient;
@@ -122,13 +139,38 @@ async function findExistingCommentId(opts: {
   for await (const page of iterator) {
     pages += 1;
     for (const comment of page.data) {
-      if (typeof comment.body === 'string' && comment.body.includes(opts.marker)) {
+      if (isAdoptableBotComment(comment, opts.marker)) {
         return comment.id;
       }
     }
     if (pages >= MAX_PAGES) return null;
   }
   return null;
+}
+
+/**
+ * @brief: True when `comment` is our own marker comment and therefore safe to
+ *         adopt (PATCH). Requires BOTH the marker substring AND a bot author.
+ *         A comment's `user.type` is set by GitHub and cannot be forged, so
+ *         gating on `type === 'Bot'` stops a human commenter from planting the
+ *         public marker to hijack (or suppress) our comment slot — a human's
+ *         type is `'User'`, so their planted marker is ignored and a fresh
+ *         comment is created. The login is matched by the `[bot]` suffix rather
+ *         than a fixed `github-actions[bot]` so a run configured with a GitHub
+ *         App installation token (author `<app>[bot]`) still updates its own
+ *         comment instead of duplicating it every run.
+ *
+ * @params: (comment: ScannedComment) -> A comment from the paginated listing.
+ * @params: (marker: string)          -> The identifying marker substring.
+ *
+ * @returns: boolean — true iff the comment is a bot-authored marker comment.
+ */
+function isAdoptableBotComment(comment: ScannedComment, marker: string): boolean {
+  if (typeof comment.body !== 'string' || !comment.body.includes(marker)) return false;
+  const user = comment.user;
+  return (
+    user?.type === 'Bot' && typeof user.login === 'string' && user.login.endsWith('[bot]')
+  );
 }
 
 function validateInputs(opts: {

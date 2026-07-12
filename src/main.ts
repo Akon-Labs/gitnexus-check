@@ -31,16 +31,20 @@ import { composeWithDigest, renderSinceCommitComment, sinceCommitMarker } from '
  *           6. renderComment  → markdown ≤ CHAR_BUDGET.
  *           6b. aiSummary     → if the Hub returned a digest, splice it on top
  *                               and collapse detail; else post (6) unchanged.
- *           7. postOrUpdate   → Octokit upsert by marker (MAIN comment).
+ *           7. postOrUpdate   → Octokit upsert by marker (MAIN comment). Fork
+ *                               PRs carry a read-only token: they skip the write
+ *                               and log the rendered comment instead, and any
+ *                               403 degrades to a warning. Neither fails the run.
  *           6c. sinceLastCommit → if present, post a SEPARATE per-SHA comment;
- *                               best-effort, never fails the run.
+ *                               best-effort, never fails the run (skipped on forks).
  *           8. setOutput      → comment-id, blast-level, gate-decision.
  *           9. evaluateGate   → setFailed iff blast level meets/exceeds threshold.
  *
  *         Every Hub call wraps in try/catch → classifyError('hub'); every
  *         GitHub call wraps similarly with 'github' context. The gate is the
  *         only setFailed driven by a successful run and fires AFTER the
- *         comment is posted. On any thrown classified message we call
+ *         comment is posted — so a fork PR (log-only) and a 403 (warning) still
+ *         reach it. On any other thrown classified message we call
  *         core.error + core.setFailed and return — no further work after the
  *         first failure.
  *
@@ -69,6 +73,10 @@ export async function main(): Promise<void> {
   // one. Degrades to undefined (never throws) so a malformed/absent sha simply
   // omits the anchor rather than failing the run.
   const headSha = readHeadSha(ctx.payload);
+  // Fork PRs run with a read-only GITHUB_TOKEN, so any comment write 403s. We
+  // detect the fork from the webhook payload up-front and degrade to log-only
+  // (see §7) rather than failing the run after the Hub has done its work.
+  const isFork = isForkPr(ctx.payload);
 
   core.info(`GitNexus Review — PR #${prNumber} (${fullName})`);
 
@@ -113,24 +121,56 @@ export async function main(): Promise<void> {
   const hasDigest = typeof blast.aiSummary === 'string' && blast.aiSummary.trim().length > 0;
   const body = hasDigest ? composeWithDigest(rawBody, blast.aiSummary ?? '') : rawBody;
 
+  // ── 7. Post (or update) the MAIN comment — unless this PR comes from a fork.
+  //        A fork PR's read-only GITHUB_TOKEN cannot write comments: the attempt
+  //        403s and would fail the run AFTER the Hub compute, silently blocking
+  //        the fork PR's gate. We degrade to log-only: emit the rendered review
+  //        into the step log so the analysis stays visible, skip the write, and
+  //        let the gate below run on the Hub data exactly as for a same-repo PR.
   let posted;
-  try {
-    const octokit = github.getOctokit(githubToken);
-    posted = await postOrUpdateComment({
-      client: asIssueCommentsClient(octokit),
-      owner,
-      repo,
-      prNumber,
-      marker: COMMENT_MARKER,
-      body,
-    });
-  } catch (err) {
-    return fail(err, 'github', 'postOrUpdateComment');
+  if (isFork) {
+    core.info(
+      'Fork PR detected — GITHUB_TOKEN is read-only, so the review comment cannot be posted. ' +
+        'Running in log-only mode; the rendered review follows and the gate still applies.',
+    );
+    core.info(body);
+  } else {
+    try {
+      const octokit = github.getOctokit(githubToken);
+      posted = await postOrUpdateComment({
+        client: asIssueCommentsClient(octokit),
+        owner,
+        repo,
+        prNumber,
+        marker: COMMENT_MARKER,
+        body,
+      });
+    } catch (err) {
+      // Defense in depth: a 403 the fork precheck did not catch (a restricted
+      // same-repo token — e.g. a Dependabot PR, which is NOT a fork but still
+      // gets a read-only GITHUB_TOKEN) must never fail the run — the Hub compute
+      // and the gate below are the contract. But unlike a fork (an expected,
+      // benign case we announce with core.info), a same-repo 403 is usually a
+      // real misconfiguration the maintainer should fix, so surface it as an
+      // error ANNOTATION (visible, non-failing) with the actionable cause rather
+      // than a warning that is easy to miss. Any other error still fails fast.
+      if (isForbidden(err)) {
+        core.error(
+          `Could not post the review comment: ${classifyError(err, 'github')}. ` +
+            "If this is a same-repo PR, grant the workflow 'pull-requests: write' " +
+            'permission; the gate still ran on the Hub analysis below.',
+        );
+      } else {
+        return fail(err, 'github', 'postOrUpdateComment');
+      }
+    }
   }
 
-  core.setOutput('comment-id', String(posted.commentId));
   core.setOutput('blast-level', blast.blastLevel);
-  core.info(`Comment ${posted.action} (id=${posted.commentId}); blast=${blast.blastLevel}.`);
+  if (posted) {
+    core.setOutput('comment-id', String(posted.commentId));
+    core.info(`Comment ${posted.action} (id=${posted.commentId}); blast=${blast.blastLevel}.`);
+  }
 
   // ── 6c. Best-effort: when the Hub returned a "since last commit" delta (a PR
   //        re-push), post it as a SEPARATE standalone comment keyed on a per-SHA
@@ -139,8 +179,9 @@ export async function main(): Promise<void> {
   //        per-commit history in the thread. This is additive: a failure here is
   //        swallowed via classifyError so it can NEVER fail the run, change the
   //        comment-id output, or affect the gate — the main review is the contract.
+  //        Skipped entirely on fork PRs (read-only token — same reason as §7).
   const delta = blast.sinceLastCommit;
-  if (delta != null) {
+  if (delta != null && !isFork) {
     try {
       const octokit = github.getOctokit(githubToken);
       const sincePosted = await postOrUpdateComment({
@@ -184,6 +225,51 @@ const SHA_RE = /^[0-9a-f]{7,40}$/i;
 function readHeadSha(payload: unknown): string | undefined {
   const sha = (payload as { pull_request?: { head?: { sha?: unknown } } })?.pull_request?.head?.sha;
   return typeof sha === 'string' && SHA_RE.test(sha) ? sha : undefined;
+}
+
+/**
+ * @brief: Detect a fork PR from the webhook payload. A fork PR's head lives in
+ *         a different repository than the base, so the auto-issued GITHUB_TOKEN
+ *         is read-only and comment writes 403. Returns true when the head repo
+ *         was deleted (`head.repo === null`, GitHub's fork-deleted signal) or its
+ *         full_name differs from the base repository's full_name. Never throws.
+ *
+ *         When either full_name is missing we cannot prove a mismatch and return
+ *         false (same-repo): a real pull_request payload always carries both, so
+ *         this only affects malformed input, where the 403 hardening in §7 is the
+ *         backstop. Erring toward "same-repo" here avoids silently suppressing
+ *         the comment on a legitimate PR.
+ *
+ * @params: (payload: unknown) -> The GitHub Actions event payload (ctx.payload).
+ *
+ * @returns: boolean — true iff this PR originates from a fork.
+ */
+function isForkPr(payload: unknown): boolean {
+  const p = payload as {
+    repository?: { full_name?: unknown };
+    pull_request?: { head?: { repo?: { full_name?: unknown } | null } };
+  };
+  const head = p?.pull_request?.head;
+  if (head?.repo === null) return true;
+  const headFullName = head?.repo?.full_name;
+  const baseFullName = p?.repository?.full_name;
+  if (typeof headFullName !== 'string' || typeof baseFullName !== 'string') return false;
+  return headFullName !== baseFullName;
+}
+
+/**
+ * @brief: True when a thrown value is an HTTP 403. Recognises both the axios
+ *         shape (`err.response.status`) and the Octokit RequestError shape
+ *         (`err.status`). Used to degrade a forbidden comment write to a warning
+ *         instead of failing the run (fork PRs, restricted tokens).
+ *
+ * @params: (err: unknown) -> Thrown value from a comment-post call.
+ *
+ * @returns: boolean — true iff the error carries a 403 status.
+ */
+function isForbidden(err: unknown): boolean {
+  const e = err as { status?: unknown; response?: { status?: unknown } };
+  return e?.status === 403 || e?.response?.status === 403;
 }
 
 /**
