@@ -34983,11 +34983,12 @@ async function main() {
         }
     }
     // ── 9. Gate — the only success-path setFailed, evaluated after the
-    //        comment is posted so reviewers always have the report.
+    //        report is posted or logged so reviewers know where to find it.
     const decision = (0, gate_1.evaluateGate)({ blastLevel: blast.blastLevel, threshold });
     core.setOutput('gate-decision', decision);
     if (decision === 'fail') {
-        core.setFailed(`GitNexus gate: blast level ${blast.blastLevel} meets or exceeds threshold ${threshold}. See PR comment.`);
+        const reportLocation = posted ? 'See PR comment.' : 'See action log.';
+        core.setFailed(`GitNexus gate: blast level ${blast.blastLevel} meets or exceeds threshold ${threshold}. ${reportLocation}`);
         return;
     }
 }
