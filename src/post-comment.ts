@@ -4,9 +4,25 @@
  *         and either PATCH the existing comment body or POST a new one.
  *         Token handling: the GITHUB_TOKEN flows through `@actions/github`
  *         via getOctokit and is never read, logged, or formatted here.
+ *         A comment is only adopted (PATCHed) when its author is US — an exact
+ *         match against the resolved authenticated actor (a PAT), else the
+ *         `[bot]`-suffix heuristic (GITHUB_TOKEN) — so a human commenter cannot
+ *         plant the public marker to hijack or suppress our comment slot
+ *         (see isAdoptableOwnComment / isOwnedComment).
  */
 
 import * as github from '@actions/github';
+
+/**
+ * @brief: The subset of an issue comment we read when scanning for our marker.
+ *         `user` carries the author identity GitHub sets (never client-supplied)
+ *         so we can tell our own bot comment from a human-planted lookalike.
+ */
+type ScannedComment = {
+  id: number;
+  body?: string;
+  user?: { login?: string; type?: string } | null;
+};
 
 /**
  * @brief: GitHub REST client surface area we depend on. We narrow Octokit
@@ -18,7 +34,7 @@ export interface IssueCommentsClient {
     iterator: (
       route: 'GET /repos/{owner}/{repo}/issues/{issue_number}/comments',
       params: { owner: string; repo: string; issue_number: number; per_page: number },
-    ) => AsyncIterable<{ data: Array<{ id: number; body?: string }> }>;
+    ) => AsyncIterable<{ data: Array<ScannedComment> }>;
   };
   rest: {
     issues: {
@@ -34,6 +50,20 @@ export interface IssueCommentsClient {
         comment_id: number;
         body: string;
       }) => Promise<{ data: { id: number } }>;
+    };
+    users: AuthenticatedActorClient['rest']['users'];
+  };
+}
+
+/**
+ * @brief: Minimal client surface for resolving the authenticated actor. Shared
+ *         by the comment poster and the review reconciler so both derive the same
+ *         identity semantics from one helper (resolveActorLogin).
+ */
+export interface AuthenticatedActorClient {
+  rest: {
+    users: {
+      getAuthenticated: () => Promise<{ data: { login?: string } }>;
     };
   };
 }
@@ -78,7 +108,12 @@ export async function postOrUpdateComment(opts: {
   body: string;
 }): Promise<PostCommentResult> {
   validateInputs(opts);
-  const existingId = await findExistingCommentId(opts);
+  // Resolve the authenticated actor once. A user-scoped PAT github-token returns
+  // its owner login (so we recognise our OWN prior comment by exact login and
+  // keep upsert idempotency); the ephemeral GITHUB_TOKEN 403s → null, and we fall
+  // back to the [bot]-suffix heuristic (it posts as github-actions[bot]).
+  const actorLogin = await resolveActorLogin(opts.client);
+  const existingId = await findExistingCommentId(opts, actorLogin);
   if (existingId !== null) {
     const res = await opts.client.rest.issues.updateComment({
       owner: opts.owner,
@@ -98,17 +133,24 @@ export async function postOrUpdateComment(opts: {
 }
 
 /**
- * @brief: Page through the PR's issue comments and return the id of the
- *         first comment whose body contains `marker`. Returns null if no
- *         match is found within MAX_PAGES.
+ * @brief: Page through the PR's issue comments and return the id of the first
+ *         comment we may safely adopt: one whose body contains `marker` AND
+ *         whose author is US (see isAdoptableOwnComment — exact-login when the
+ *         actor is known, else the bot heuristic). A marker planted by a human is
+ *         ignored so a commenter cannot hijack or suppress our comment slot.
+ *         Returns null if none is found within MAX_PAGES — the caller then
+ *         creates a fresh comment.
  */
-async function findExistingCommentId(opts: {
-  client: IssueCommentsClient;
-  owner: string;
-  repo: string;
-  prNumber: number;
-  marker: string;
-}): Promise<number | null> {
+async function findExistingCommentId(
+  opts: {
+    client: IssueCommentsClient;
+    owner: string;
+    repo: string;
+    prNumber: number;
+    marker: string;
+  },
+  actorLogin: string | null,
+): Promise<number | null> {
   const iterator = opts.client.paginate.iterator(
     'GET /repos/{owner}/{repo}/issues/{issue_number}/comments',
     {
@@ -122,13 +164,108 @@ async function findExistingCommentId(opts: {
   for await (const page of iterator) {
     pages += 1;
     for (const comment of page.data) {
-      if (typeof comment.body === 'string' && comment.body.includes(opts.marker)) {
+      if (isAdoptableOwnComment(comment, opts.marker, actorLogin)) {
         return comment.id;
       }
     }
     if (pages >= MAX_PAGES) return null;
   }
   return null;
+}
+
+/**
+ * @brief: True when `comment` is our OWN marker comment and therefore safe to
+ *         adopt (PATCH). Requires BOTH the marker substring AND that the author is
+ *         us (see isOwnedComment): an exact login match when we resolved the
+ *         authenticated actor (a PAT github-token), else the `[bot]`-suffix
+ *         heuristic. A human commenter is never adopted — their login differs
+ *         from our actor and their unforgeable `user.type` is `'User'`, not
+ *         `'Bot'` — so a planted marker cannot hijack or suppress our slot.
+ *
+ * @params: (comment: ScannedComment)     -> A comment from the paginated listing.
+ * @params: (marker: string)              -> The identifying marker substring.
+ * @params: (actorLogin: string | null)   -> The resolved authenticated actor, or null.
+ *
+ * @returns: boolean — true iff the comment is our own marker comment.
+ */
+function isAdoptableOwnComment(
+  comment: ScannedComment,
+  marker: string,
+  actorLogin: string | null,
+): boolean {
+  if (typeof comment.body !== 'string' || !comment.body.includes(marker)) return false;
+  return isOwnedComment(comment.user, actorLogin);
+}
+
+/**
+ * @brief: True when a comment's author is a bot we may safely adopt. A comment's
+ *         `user.type` is set by GitHub and cannot be forged, so gating on
+ *         `type === 'Bot'` stops a human commenter from planting one of our
+ *         public markers to hijack (or suppress) a comment slot — a human's type
+ *         is `'User'`. The login is matched by the `[bot]` suffix rather than a
+ *         fixed `github-actions[bot]` so a run configured with a GitHub App
+ *         installation token (author `<app>[bot]`) still adopts its own comment.
+ *
+ *         The shared fallback path of `isOwnedComment` (used by both the comment
+ *         poster and the review reconciler) when the authenticated actor is
+ *         unknown (GITHUB_TOKEN), so both surfaces derive identity from one place
+ *         with no drift.
+ *
+ * @params: (user) -> The GitHub-set author identity off a comment.
+ * @returns: boolean — true iff the author is a `[bot]`-suffixed Bot.
+ */
+export function isBotAuthor(user: { login?: string; type?: string } | null | undefined): boolean {
+  return (
+    user?.type === 'Bot' && typeof user.login === 'string' && user.login.endsWith('[bot]')
+  );
+}
+
+/**
+ * @brief: Resolve the login of the token we are authenticated as, or null when it
+ *         cannot be determined. A user-scoped PAT resolves to its owner login;
+ *         the ephemeral GITHUB_TOKEN has no user identity and 403s, which we
+ *         treat as null (the caller then falls back to the bot-identity
+ *         heuristic). NEVER throws — a failed lookup is just an unknown actor.
+ *
+ *         Exported + shared so post-comment (upsert) and post-review (reconcile)
+ *         derive identity from one place, with no drift.
+ *
+ * @params: (client: AuthenticatedActorClient) -> Narrowed Octokit exposing users.getAuthenticated.
+ * @returns: Promise<string | null> — the actor login, or null when unknown.
+ */
+export async function resolveActorLogin(client: AuthenticatedActorClient): Promise<string | null> {
+  try {
+    const res = await client.rest.users.getAuthenticated();
+    const login = res?.data?.login;
+    return typeof login === 'string' && login.length > 0 ? login : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * @brief: True when a comment/review is OWNED by us and therefore safe to adopt.
+ *         When the authenticated actor is known (a PAT), require an EXACT login
+ *         match: this restores upsert idempotency for a user-PAT github-token
+ *         (whose author is a `User`, not a `[bot]`, so isBotAuthor alone would
+ *         miss it → duplicates) AND stops us adopting another bot's artifact.
+ *         When the actor is unknown (GITHUB_TOKEN 403 → null), fall back to the
+ *         `[bot]`-suffix heuristic (it posts as github-actions[bot]). Either way a
+ *         human-planted lookalike is rejected: their login != our actor and their
+ *         unforgeable type is `'User'`.
+ *
+ * @params: (user)       -> The GitHub-set author identity off a comment/review.
+ * @params: (actorLogin) -> The resolved authenticated actor login, or null.
+ * @returns: boolean — true iff the artifact is ours.
+ */
+export function isOwnedComment(
+  user: { login?: string; type?: string } | null | undefined,
+  actorLogin: string | null,
+): boolean {
+  if (actorLogin !== null) {
+    return typeof user?.login === 'string' && user.login === actorLogin;
+  }
+  return isBotAuthor(user);
 }
 
 function validateInputs(opts: {
@@ -176,6 +313,9 @@ export function asIssueCommentsClient(
       issues: {
         createComment: (params) => octokit.rest.issues.createComment(params),
         updateComment: (params) => octokit.rest.issues.updateComment(params),
+      },
+      users: {
+        getAuthenticated: () => octokit.rest.users.getAuthenticated(),
       },
     },
   };

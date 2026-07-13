@@ -99,7 +99,7 @@ name: GitNexus
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
@@ -111,7 +111,7 @@ jobs:
     steps:
       - uses: Akon-Labs/gitnexus-check@release
         with:
-          hub-url: https://api.akonlabs.com
+          hub-url: https://api-staging.akonlabs.com
           token: ${{ secrets.GITNEXUS_TOKEN }}
 ```
 
@@ -127,6 +127,9 @@ Open a PR and the comment shows up.
 | `token` | yes | none | GitNexus CI token (`gnx_...`). Store as a repo secret. |
 | `github-token` | no | `${{ github.token }}` | Token used to post the PR comment. |
 | `fail-on-blast-level` | no | `''` (off) | Optional merge gate. See below. |
+| `inline-findings` | no | `false` | Opt-in line-anchored review comments. See below. |
+| `max-inline-findings` | no | `10` | Cap on inline comments per run (narrowing only). |
+| `inline-severity-floor` | no | `warning` | Minimum inline severity: `warning` or `error` (narrowing only). |
 
 ### Outputs
 
@@ -135,6 +138,8 @@ Open a PR and the comment shows up.
 | `comment-id` | The GitHub comment id created or updated. |
 | `blast-level` | The PR blast level: `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`. |
 | `gate-decision` | `pass`, `fail`, or `neutral`. `neutral` means advisory (no gate set). |
+| `inline-findings-posted` | Inline review comments posted or updated this run (0 when off). |
+| `inline-findings-suppressed` | Findings not surfaced inline: Hub noise-budget plus severity-floor narrowing (0 when off). Over-cap findings are demoted to the fallback section, not suppressed. |
 
 ### The merge gate (`fail-on-blast-level`)
 
@@ -146,7 +151,7 @@ check always has an explanation attached.
 ```yaml
 - uses: Akon-Labs/gitnexus-check@release
   with:
-    hub-url: https://api.akonlabs.com
+    hub-url: https://api-staging.akonlabs.com
     token: ${{ secrets.GITNEXUS_TOKEN }}
     fail-on-blast-level: CRITICAL   # block only on CRITICAL, omit for advisory
 ```
@@ -158,6 +163,28 @@ empty value keeps the action advisory.
 > [!NOTE]
 > To make the gate block merges, mark the GitNexus check as required in your branch
 > protection rules (**Settings → Branches → Branch protection rules**).
+
+### Inline findings (`inline-findings`)
+
+Off by default. Set `inline-findings: true` to also post line-anchored review comments
+for individual GitNexus findings, on top of the main summary comment. Findings that can't
+be anchored to a changed line are collected in a short section at the end of the main
+comment instead. `max-inline-findings` caps how many are posted per run and
+`inline-severity-floor` (`warning` or `error`) sets the minimum severity — both only ever
+narrow what the Hub already produced.
+
+```yaml
+- uses: Akon-Labs/gitnexus-check@release
+  with:
+    hub-url: https://app.akonlabs.com
+    token: ${{ secrets.GITNEXUS_TOKEN }}
+    inline-findings: true
+```
+
+While `inline-findings` is on, the action stays silent on **draft** PRs and posts its first
+review the moment the PR is marked ready — so add `ready_for_review` to the workflow
+trigger (as shown in the Quick Start template). With `inline-findings` off, behavior is
+unchanged: the main comment is posted on drafts as before.
 
 ## How it works
 

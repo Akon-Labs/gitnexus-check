@@ -18,8 +18,11 @@ import {
 } from './hub-client';
 import { renderComment, COMMENT_MARKER } from './render-comment';
 import { asIssueCommentsClient, postOrUpdateComment } from './post-comment';
+import { asReviewClient, reconcileFindings } from './post-review';
+import { renderFallbackSection } from './render-findings';
 import { parseThreshold, evaluateGate } from './gate';
 import { composeWithDigest, renderSinceCommitComment, sinceCommitMarker } from './slm-format';
+import type { FindingItem } from './types/blast-result';
 
 /**
  * @brief: Top-level orchestration. Sequence:
@@ -31,16 +34,21 @@ import { composeWithDigest, renderSinceCommitComment, sinceCommitMarker } from '
  *           6. renderComment  → markdown ≤ CHAR_BUDGET.
  *           6b. aiSummary     → if the Hub returned a digest, splice it on top
  *                               and collapse detail; else post (6) unchanged.
- *           7. postOrUpdate   → Octokit upsert by marker (MAIN comment).
+ *           7. postOrUpdate   → Octokit upsert by marker (MAIN comment). Always
+ *                               ATTEMPTED (a fork may carry write access); a 403
+ *                               degrades to log-only (benign info on a fork, loud
+ *                               error on a same-repo misconfig) and logs the body.
+ *                               Never fails the run on a 403.
  *           6c. sinceLastCommit → if present, post a SEPARATE per-SHA comment;
- *                               best-effort, never fails the run.
+ *                               best-effort, never fails the run (attempted on forks too).
  *           8. setOutput      → comment-id, blast-level, gate-decision.
  *           9. evaluateGate   → setFailed iff blast level meets/exceeds threshold.
  *
  *         Every Hub call wraps in try/catch → classifyError('hub'); every
  *         GitHub call wraps similarly with 'github' context. The gate is the
  *         only setFailed driven by a successful run and fires AFTER the
- *         comment is posted. On any thrown classified message we call
+ *         comment is posted — so a fork PR (log-only) and a 403 (warning) still
+ *         reach it. On any other thrown classified message we call
  *         core.error + core.setFailed and return — no further work after the
  *         first failure.
  *
@@ -69,6 +77,23 @@ export async function main(): Promise<void> {
   // one. Degrades to undefined (never throws) so a malformed/absent sha simply
   // omits the anchor rather than failing the run.
   const headSha = readHeadSha(ctx.payload);
+  // Fork PRs run with a read-only GITHUB_TOKEN, so any comment write 403s. We
+  // detect the fork from the webhook payload up-front and degrade to log-only
+  // (see §7) rather than failing the run after the Hub has done its work.
+  const isFork = isForkPr(ctx.payload);
+
+  // Wave-2 inline-findings config. All narrowing-only; empty/unset inputs keep
+  // the feature OFF and the pre-Wave-2 behavior byte-identical.
+  const findingsCfg = readFindingsConfig();
+
+  // Gated draft-skip (Wave-2 trigger model): when inline findings are enabled
+  // AND the PR is still a draft, stay silent until it is marked ready — cubic's
+  // behavior. GATED behind inline-findings so existing users see no change (the
+  // Action posts the blast comment on drafts today). Exits BEFORE any Hub call.
+  if (findingsCfg.enabled && isDraftPr(ctx.payload)) {
+    core.info('PR is draft and inline-findings is enabled — skipping review until ready_for_review.');
+    return;
+  }
 
   core.info(`GitNexus Review — PR #${prNumber} (${fullName})`);
 
@@ -113,6 +138,19 @@ export async function main(): Promise<void> {
   const hasDigest = typeof blast.aiSummary === 'string' && blast.aiSummary.trim().length > 0;
   const body = hasDigest ? composeWithDigest(rawBody, blast.aiSummary ?? '') : rawBody;
 
+  // ── 7. Post (or update) the MAIN comment. We ATTEMPT the write even on a fork:
+  //        a fork PR CAN carry write access (pull_request_target, or a configured
+  //        write PAT as github-token), so isFork is NOT proof we can't post. We
+  //        only degrade on an actual 403. A 403 must never fail the run — the Hub
+  //        compute and the gate below are the contract — so on isForbidden we log
+  //        the rendered review into the step log (keeping the analysis visible)
+  //        and continue. A FORK never fails the run on the main comment at ALL:
+  //        its write is inherently unreliable (usually a read-only token), so a
+  //        403 OR any transient error (500 / rate-limit) degrades to log-only —
+  //        failing a fork on a comment-post hiccup would re-block its gate, the
+  //        original bug. For a SAME-REPO PR a 403 (usually a real misconfig —
+  //        e.g. a Dependabot read-only token) degrades with a loud core.error
+  //        naming the pull-requests:write remedy; any non-403 still fails fast.
   let posted;
   try {
     const octokit = github.getOctokit(githubToken);
@@ -125,12 +163,35 @@ export async function main(): Promise<void> {
       body,
     });
   } catch (err) {
-    return fail(err, 'github', 'postOrUpdateComment');
+    if (isFork) {
+      // Forks: NEVER fail the run — degrade to log-only on any error kind.
+      core.info(
+        isForbidden(err)
+          ? 'Fork PR detected — GITHUB_TOKEN is read-only, so the review comment cannot be posted. ' +
+              'Running in log-only mode; the rendered review follows and the gate still applies.'
+          : `Fork PR — could not post the review comment (${classifyError(err, 'github')}). ` +
+              'Running in log-only mode; the rendered review follows and the gate still applies.',
+      );
+      core.info(body);
+    } else if (isForbidden(err)) {
+      core.error(
+        `Could not post the review comment: ${classifyError(err, 'github')}. ` +
+          "If this is a same-repo PR, grant the workflow 'pull-requests: write' " +
+          'permission; the gate still ran on the Hub analysis below.',
+      );
+      // Log the rendered review after a recovered 403 so a failed gate that
+      // says "See action log." actually points at the report (#5).
+      core.info(body);
+    } else {
+      return fail(err, 'github', 'postOrUpdateComment');
+    }
   }
 
-  core.setOutput('comment-id', String(posted.commentId));
   core.setOutput('blast-level', blast.blastLevel);
-  core.info(`Comment ${posted.action} (id=${posted.commentId}); blast=${blast.blastLevel}.`);
+  if (posted) {
+    core.setOutput('comment-id', String(posted.commentId));
+    core.info(`Comment ${posted.action} (id=${posted.commentId}); blast=${blast.blastLevel}.`);
+  }
 
   // ── 6c. Best-effort: when the Hub returned a "since last commit" delta (a PR
   //        re-push), post it as a SEPARATE standalone comment keyed on a per-SHA
@@ -139,6 +200,8 @@ export async function main(): Promise<void> {
   //        per-commit history in the thread. This is additive: a failure here is
   //        swallowed via classifyError so it can NEVER fail the run, change the
   //        comment-id output, or affect the gate — the main review is the contract.
+  //        Attempted even on fork PRs (a fork may carry write access); a read-only
+  //        403 is swallowed into a warning like any other failure — never pre-skipped.
   const delta = blast.sinceLastCommit;
   if (delta != null) {
     try {
@@ -157,13 +220,88 @@ export async function main(): Promise<void> {
     }
   }
 
+  // ── 6d. Best-effort inline findings (Wave 2). Posts line-anchored review
+  //        comments for anchored findings and demotes the rest into a fallback
+  //        section appended to the MAIN comment. This runs AFTER the main comment
+  //        and BEFORE the gate, and is strictly best-effort: any failure is
+  //        swallowed so it can NEVER fail the run or affect the gate (the gate
+  //        reads blastLevel only). The two outputs are set ALWAYS (0 when off).
+  //        Attempted even on fork PRs (a fork may carry write access); a read-only
+  //        403 degrades — reconcile returns the findings as failed and the fallback
+  //        post is swallowed — rather than being pre-skipped. Skipped entirely when
+  //        the input is off, when the Hub sent no findings envelope, or when the Hub
+  //        reported a findings error — in every skip case the main comment stays
+  //        byte-identical.
+  let inlinePosted = 0;
+  let inlineSuppressed = 0;
+  const findings = blast.findings;
+  if (findingsCfg.enabled && findings != null && findings.error === null) {
+    try {
+      const narrowed = narrowFindings(findings.items, findingsCfg);
+      inlineSuppressed = findings.suppressedCount + narrowed.suppressed;
+      const reconcile = await reconcileFindings({
+        client: asReviewClient(github.getOctokit(githubToken)),
+        owner,
+        repo,
+        prNumber,
+        analyzedSha: findings.analyzedSha,
+        items: narrowed.inline,
+      });
+      inlinePosted = reconcile.posted + reconcile.updated;
+
+      // Findings that couldn't be line-anchored, plus any that failed to post,
+      // render in the demoted fallback section of the MAIN comment. We only
+      // re-post (update) the main comment when there is something to demote, so
+      // the byte-identical main comment is preserved when there is not.
+      const fallbackItems = [...narrowed.demoted, ...reconcile.failed];
+      if (fallbackItems.length > 0 || findings.truncated) {
+        let section = renderFallbackSection(fallbackItems);
+        // Surface the Hub's time-box marker — partial results must never
+        // read as complete ones.
+        if (findings.truncated) {
+          const note = '_The findings stage hit its time budget — results may be partial._';
+          section = section ? `${section}\n\n${note}` : note;
+        }
+        const composed = `${body.trimEnd()}\n\n${section}\n`;
+        if (section && composed.length <= GITHUB_COMMENT_HARD_CAP) {
+          // Reuse §7's comment id when we have it — re-listing the thread to
+          // rediscover our own comment is wasted API budget and a needless
+          // race window on busy PRs.
+          if (posted) {
+            const octokit = github.getOctokit(githubToken);
+            await octokit.rest.issues.updateComment({
+              owner,
+              repo,
+              comment_id: posted.commentId,
+              body: composed,
+            });
+          } else {
+            await postOrUpdateComment({
+              client: asIssueCommentsClient(github.getOctokit(githubToken)),
+              owner,
+              repo,
+              prNumber,
+              marker: COMMENT_MARKER,
+              body: composed,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      core.warning(`inline-findings skipped: ${classifyError(err, 'github')}`);
+    }
+  }
+  core.setOutput('inline-findings-posted', String(inlinePosted));
+  core.setOutput('inline-findings-suppressed', String(inlineSuppressed));
+
   // ── 9. Gate — the only success-path setFailed, evaluated after the
-  //        comment is posted so reviewers always have the report.
+  //        report is posted or logged so reviewers know where to find it.
   const decision = evaluateGate({ blastLevel: blast.blastLevel, threshold });
   core.setOutput('gate-decision', decision);
   if (decision === 'fail') {
+    const reportLocation = posted ? 'See PR comment.' : 'See action log.';
     core.setFailed(
-      `GitNexus gate: blast level ${blast.blastLevel} meets or exceeds threshold ${threshold}. See PR comment.`,
+      `GitNexus gate: blast level ${blast.blastLevel} meets or exceeds threshold ${threshold}. ${reportLocation}`,
     );
     return;
   }
@@ -171,6 +309,77 @@ export async function main(): Promise<void> {
 
 /** SHA shape guard — 7..40 hex. Used to degrade a malformed head sha to undefined. */
 const SHA_RE = /^[0-9a-f]{7,40}$/i;
+
+/**
+ * GitHub's hard cap on an issue-comment body is 65,536 chars. The main comment
+ * targets CHAR_BUDGET (60,000), leaving headroom for an appended fallback
+ * section; we still guard the composed length so a pathological case skips the
+ * append rather than 422-ing the update.
+ */
+const GITHUB_COMMENT_HARD_CAP = 65_000;
+
+/**
+ * @brief: Read the Wave-2 inline-findings inputs, all narrowing-only. Defaults
+ *         (empty inputs, as in unit tests) keep the feature OFF: `enabled` false,
+ *         `maxItems` 10, `severityFloor` 'warning'. `max-inline-findings` is
+ *         clamped to a positive integer; `inline-severity-floor` accepts only
+ *         'error' to raise the floor, anything else (incl. '') stays 'warning'.
+ *
+ * @returns: { enabled, maxItems, severityFloor } — the resolved findings config.
+ */
+function readFindingsConfig(): {
+  enabled: boolean;
+  maxItems: number;
+  severityFloor: 'warning' | 'error';
+} {
+  const enabled = core.getInput('inline-findings').trim().toLowerCase() === 'true';
+  const parsedMax = Number.parseInt(core.getInput('max-inline-findings').trim(), 10);
+  const maxItems = Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : 10;
+  const severityFloor =
+    core.getInput('inline-severity-floor').trim().toLowerCase() === 'error' ? 'error' : 'warning';
+  return { enabled, maxItems, severityFloor };
+}
+
+/** True when the PR payload marks this PR as a draft. Never throws. */
+function isDraftPr(payload: unknown): boolean {
+  return (payload as { pull_request?: { draft?: unknown } })?.pull_request?.draft === true;
+}
+
+/** Total order over finding severities so a floor comparison is a numeric `>=`. */
+function severityRank(severity: 'warning' | 'error'): number {
+  return severity === 'error' ? 1 : 0;
+}
+
+/**
+ * @brief: Narrow a Hub findings list by the Action's severity floor and inline
+ *         cap (narrowing-only — never surfaces more than the Hub sent). Splits
+ *         the floor-passing items into the anchored set to post inline (capped)
+ *         and the demoted set (anchored:false) for the fallback section, and
+ *         counts what the Action suppressed (below-floor + over-cap) so the
+ *         caller can add it to the Hub's suppressedCount.
+ *
+ * @params: (items) -> The normalised Hub findings items.
+ * @params: (cfg)   -> { maxItems, severityFloor }.
+ * @returns: { inline, demoted, suppressed } — inline posts, fallback items, suppressed count.
+ */
+function narrowFindings(
+  items: FindingItem[],
+  cfg: { maxItems: number; severityFloor: 'warning' | 'error' },
+): { inline: FindingItem[]; demoted: FindingItem[]; suppressed: number } {
+  const floor = severityRank(cfg.severityFloor);
+  const afterFloor = items.filter((it) => severityRank(it.severity) >= floor);
+  const floorSuppressed = items.length - afterFloor.length;
+
+  const anchored = afterFloor.filter((it) => it.anchored && it.anchor != null);
+  const demoted = afterFloor.filter((it) => !(it.anchored && it.anchor != null));
+  const inline = anchored.slice(0, cfg.maxItems);
+  // Over-cap anchored items DEMOTE to the fallback section rather than
+  // vanish — the narrowing knob bounds inline noise, it must not hide
+  // findings entirely.
+  const overCap = anchored.slice(cfg.maxItems);
+
+  return { inline, demoted: [...demoted, ...overCap], suppressed: floorSuppressed };
+}
 
 /**
  * @brief: Read the PR head commit SHA from the webhook payload, degrading to
@@ -184,6 +393,51 @@ const SHA_RE = /^[0-9a-f]{7,40}$/i;
 function readHeadSha(payload: unknown): string | undefined {
   const sha = (payload as { pull_request?: { head?: { sha?: unknown } } })?.pull_request?.head?.sha;
   return typeof sha === 'string' && SHA_RE.test(sha) ? sha : undefined;
+}
+
+/**
+ * @brief: Detect a fork PR from the webhook payload. A fork PR's head lives in
+ *         a different repository than the base, so the auto-issued GITHUB_TOKEN
+ *         is read-only and comment writes 403. Returns true when the head repo
+ *         was deleted (`head.repo === null`, GitHub's fork-deleted signal) or its
+ *         full_name differs from the base repository's full_name. Never throws.
+ *
+ *         When either full_name is missing we cannot prove a mismatch and return
+ *         false (same-repo): a real pull_request payload always carries both, so
+ *         this only affects malformed input, where the 403 hardening in §7 is the
+ *         backstop. Erring toward "same-repo" here avoids silently suppressing
+ *         the comment on a legitimate PR.
+ *
+ * @params: (payload: unknown) -> The GitHub Actions event payload (ctx.payload).
+ *
+ * @returns: boolean — true iff this PR originates from a fork.
+ */
+function isForkPr(payload: unknown): boolean {
+  const p = payload as {
+    repository?: { full_name?: unknown };
+    pull_request?: { head?: { repo?: { full_name?: unknown } | null } };
+  };
+  const head = p?.pull_request?.head;
+  if (head?.repo === null) return true;
+  const headFullName = head?.repo?.full_name;
+  const baseFullName = p?.repository?.full_name;
+  if (typeof headFullName !== 'string' || typeof baseFullName !== 'string') return false;
+  return headFullName !== baseFullName;
+}
+
+/**
+ * @brief: True when a thrown value is an HTTP 403. Recognises both the axios
+ *         shape (`err.response.status`) and the Octokit RequestError shape
+ *         (`err.status`). Used to degrade a forbidden comment write to a warning
+ *         instead of failing the run (fork PRs, restricted tokens).
+ *
+ * @params: (err: unknown) -> Thrown value from a comment-post call.
+ *
+ * @returns: boolean — true iff the error carries a 403 status.
+ */
+function isForbidden(err: unknown): boolean {
+  const e = err as { status?: unknown; response?: { status?: unknown } };
+  return e?.status === 403 || e?.response?.status === 403;
 }
 
 /**

@@ -16,7 +16,9 @@ import type {
   CrossRepoFinding,
   CrossRepoGroup,
   CrossRepoResult,
+  FlowCrossRepoFinding,
   RiskFile,
+  SymbolCrossRepoFinding,
   SymbolRef,
 } from './types/blast-result';
 
@@ -277,7 +279,10 @@ function appendSections(
   // transitive detail but never the headline.
   if (detail !== 'minimal') {
     const cr = blast.crossRepo;
-    if (cr && (cr.findings.length > 0 || cr.error !== null)) {
+    if (
+      cr &&
+      (cr.findings.length > 0 || cr.error !== null || (cr.notYetKnowable?.length ?? 0) > 0)
+    ) {
       const section = renderCrossRepo(cr, detail);
       if (section) rendered = appendBucket(parts, 'Cross-Repo Impact', [section]) || rendered;
     }
@@ -358,7 +363,7 @@ function renderCrossRepo(cr: CrossRepoResult, detail: DetailLevel): string {
     const findings = byRepo.get(repo) ?? [];
     const visible = findings.slice(0, perRepoCap);
     const noun = findings.length === 1 ? 'interface' : 'interfaces';
-    const channelLines = renderConsumerChannels(visible);
+    const channelLines = renderConsumerChannels(visible, detail);
     const hidden = findings.length - visible.length;
     if (hidden > 0) channelLines.push(`_…and ${hidden} more in this repo._`);
     const inner = channelLines.join('\n').trimEnd();
@@ -378,9 +383,21 @@ function renderCrossRepo(cr: CrossRepoResult, detail: DetailLevel): string {
       `_Based on a cross-repo analysis from ${staleDate}. Re-analyze the group for up-to-date results._`,
     );
   }
-  // Privacy: never echo the raw Hub error (it can carry a group name, §5.2).
+  // Privacy: never echo the raw Hub error (it can carry a group name, §5.2). The
+  // pre-lines / pending-rebuild caveats arrive on `cr.error` and render through
+  // this same generic degraded note (their wording never reaches the comment).
   if (cr.error !== null) {
     lines.push('_Cross-repo analysis was incomplete, so some dependents may be missing._');
+  }
+  // New-in-PR exports have no cross-repo edge yet — surface an explicit caveat
+  // (count only) so silence isn't misread as "no downstream impact".
+  const notYetKnowable = cr.notYetKnowable?.length ?? 0;
+  if (notYetKnowable > 0) {
+    const plural = notYetKnowable === 1 ? '' : 's';
+    const verb = notYetKnowable === 1 ? 'is' : 'are';
+    lines.push(
+      `_${notYetKnowable} changed symbol${plural} ${verb} new in this PR — cross-repo impact not yet knowable._`,
+    );
   }
 
   return lines.join('\n').trimEnd();
@@ -394,11 +411,11 @@ function renderCrossRepo(cr: CrossRepoResult, detail: DetailLevel): string {
  *         This turns a flat dump of near-identical bullets into a scannable map
  *         of "what kind of thing, and how many".
  */
-function renderConsumerChannels(findings: CrossRepoFinding[]): string[] {
+function renderConsumerChannels(findings: CrossRepoFinding[], detail: DetailLevel): string[] {
   const inlineItems = new Map<string, string[]>();
   const bulletItems = new Map<string, string[]>();
   for (const f of findings) {
-    const c = categorizeFinding(f);
+    const c = categorizeFinding(f, detail);
     if (!c) continue;
     const bucket = c.style === 'inline' ? inlineItems : bulletItems;
     const list = bucket.get(c.channel);
@@ -408,18 +425,23 @@ function renderConsumerChannels(findings: CrossRepoFinding[]): string[] {
 
   const out: string[] = [];
   for (const channel of CROSS_REPO_CHANNEL_ORDER) {
-    const inline = inlineItems.get(channel);
-    if (inline && inline.length > 0) {
-      out.push(`**${channel}** (${inline.length}): ${inline.join(', ')}`);
-      out.push('');
-      continue;
-    }
-    const bullets = bulletItems.get(channel);
-    if (bullets && bullets.length > 0) {
-      out.push(`**${channel}** (${bullets.length}):`);
+    // A channel can carry BOTH styles (e.g. repo-level HTTP contracts inline +
+    // sym→sym HTTP edges as located bullets). Single-style channels keep their
+    // historical rendering byte-identically; a mixed channel renders ONE
+    // header with the combined count (two headers whose counts don't sum read
+    // as a bug), folding the inline entries in as leading bullets.
+    const inline = inlineItems.get(channel) ?? [];
+    const bullets = bulletItems.get(channel) ?? [];
+    const total = inline.length + bullets.length;
+    if (total === 0) continue;
+    if (bullets.length === 0) {
+      out.push(`**${channel}** (${total}): ${inline.join(', ')}`);
+    } else {
+      out.push(`**${channel}** (${total}):`);
+      for (const i of inline) out.push(`- ${i}`);
       for (const b of bullets) out.push(`- ${b}`);
-      out.push('');
     }
+    out.push('');
   }
   return out;
 }
@@ -430,36 +452,149 @@ function renderConsumerChannels(findings: CrossRepoFinding[]): string[] {
  *         reserved 'breakage') is ignored rather than mis-rendered. Contract
  *         `via` values carry a `http:` / `messaging:` prefix that names the
  *         channel, so we strip it from the display once the channel is set.
- *         Every interpolated value is escaped for a markdown table/code cell.
+ *         A sym→sym edge whose provider is an HTTP route (providerContract.kind
+ *         'http', or a `via` starting `http:`) routes into the "HTTP routes"
+ *         channel as a located bullet — the coupled route plus the consumer's
+ *         call sites — instead of the generic "Imported symbols" channel; other
+ *         symbol edges are unchanged. Every interpolated value is escaped for a
+ *         markdown table/code cell.
  */
 function categorizeFinding(
   f: CrossRepoFinding,
+  detail: DetailLevel,
 ): { channel: string; display: string; style: 'inline' | 'bullet' } | null {
   switch (f.kind) {
     case 'symbol': {
-      const display = f.consumerSymbol
-        ? `\`${escapeCell(f.consumerSymbol.name)}\` (used in \`${escapeCell(f.consumerSymbol.filePath)}\`)`
+      if (isHttpSymbolFinding(f)) {
+        return {
+          channel: 'HTTP routes',
+          display: `\`${escapeCell(httpContractLabel(f))}\`${tierNote(f)}${renderCallSites(f, detail)}`,
+          style: 'bullet',
+        };
+      }
+      const base = f.consumerSymbol
+        ? `\`${escapeCell(f.consumerSymbol.name)}\` (used in \`${escapeCell(consumerLoc(f.consumerSymbol))}\`)`
         : `\`${escapeCell(f.via)}\``;
-      return { channel: 'Imported symbols', display, style: 'bullet' };
+      return {
+        channel: 'Imported symbols',
+        display: `${base}${tierNote(f)}${renderCallSites(f, detail)}`,
+        style: 'bullet',
+      };
     }
     case 'contract': {
       if (f.via.startsWith('http:')) {
-        return { channel: 'HTTP routes', display: `\`${escapeCell(f.via.slice(5))}\``, style: 'inline' };
+        return {
+          channel: 'HTTP routes',
+          display: `\`${escapeCell(f.via.slice(5))}\`${tierNote(f)}`,
+          style: 'inline',
+        };
       }
       if (f.via.startsWith('messaging:')) {
         return { channel: 'Messaging topics', display: `\`${escapeCell(f.via.slice(10))}\``, style: 'inline' };
       }
-      return { channel: 'Contracts', display: `\`${escapeCell(f.via)}\``, style: 'inline' };
+      return { channel: 'Contracts', display: `\`${escapeCell(f.via)}\`${tierNote(f)}`, style: 'inline' };
     }
-    case 'flow':
-      return {
-        channel: 'Shared flows',
-        display: `\`${escapeCell(f.flow.label)}\` (step ${f.flow.step} of ${f.flow.stepCount})`,
-        style: 'bullet',
-      };
+    case 'flow': {
+      // Malformed payloads reach here via the shallow trust-boundary cast, so
+      // `flow` may be absent/partial. Never deref it unguarded — renderComment
+      // runs outside a try/catch in main.ts, so a throw here would setFailed the
+      // whole check. Fall back to `via` (then a placeholder) and drop the step
+      // clause when the counters aren't both numbers.
+      const flow = (f as { flow?: FlowCrossRepoFinding['flow'] }).flow;
+      const label =
+        flow && typeof flow.label === 'string' && flow.label.length > 0
+          ? flow.label
+          : typeof f.via === 'string' && f.via.length > 0
+            ? f.via
+            : 'cross-repo flow';
+      const display =
+        flow && typeof flow.step === 'number' && typeof flow.stepCount === 'number'
+          ? `\`${escapeCell(label)}\` (step ${flow.step} of ${flow.stepCount})`
+          : `\`${escapeCell(label)}\``;
+      // Append the provenance note so an llm_adjudicated flow reads '(LLM-matched)'
+      // like symbol/contract findings — an LLM-guessed coupling is never rendered
+      // as a deterministically proven one.
+      return { channel: 'Shared flows', display: `${display}${tierNote(f)}`, style: 'bullet' };
+    }
     default:
       return null;
   }
+}
+
+/**
+ * Provenance note for LLM-adjudicated couplings: the doctrine keeps them out
+ * of every gate, and the COMMENT must be equally honest — an LLM-guessed
+ * coupling never reads like a deterministically proven one.
+ */
+function tierNote(f: { detectionTier?: string }): string {
+  return f.detectionTier === 'llm_adjudicated' ? ' _(LLM-matched)_' : '';
+}
+
+/** True when a symbol edge's provider is an HTTP route (contract kind or via prefix). */
+function isHttpSymbolFinding(f: SymbolCrossRepoFinding): boolean {
+  return (
+    f.providerContract?.kind === 'http' ||
+    (typeof f.via === 'string' && f.via.startsWith('http:'))
+  );
+}
+
+/**
+ * @brief: The coupled HTTP route label for a sym→sym HTTP edge — `METHOD path`
+ *         from `providerContract` when present, else the `http:`-stripped `via`,
+ *         else the raw `via`. Returned unescaped; the caller escapes it.
+ */
+function httpContractLabel(f: SymbolCrossRepoFinding): string {
+  const pc = f.providerContract;
+  if (pc) {
+    const parts = [pc.method, pc.path].filter(
+      (p): p is string => typeof p === 'string' && p.length > 0,
+    );
+    if (parts.length > 0) return parts.join(' ');
+  }
+  if (typeof f.via === 'string' && f.via.startsWith('http:')) return f.via.slice(5);
+  return typeof f.via === 'string' ? f.via : '';
+}
+
+/** `filePath:line` for a consumer symbol, dropping the suffix when no line. */
+function consumerLoc(cs: { filePath: string; startLine?: number | null }): string {
+  return typeof cs.startLine === 'number' ? `${cs.filePath}:${cs.startLine}` : cs.filePath;
+}
+
+/**
+ * @brief: Render a symbol finding's consumer call sites as a compact
+ *         `— \`file:line\`, …` suffix, each path run through the same
+ *         `escapeCell` the renderer applies to every Hub path. Extra detail, so
+ *         it drops at the `capped`/`minimal` ladder levels (the route/symbol
+ *         summary survives, the call-site list is what degrades). When
+ *         `consumerD1Count` exceeds the rendered sites, a `(+N more)` tail
+ *         reports the full direct-caller count. Returns '' when there is
+ *         nothing well-formed to show.
+ */
+function renderCallSites(f: SymbolCrossRepoFinding, detail: DetailLevel): string {
+  if (detail === 'capped' || detail === 'minimal' || detail === 'headline-only') return '';
+  const sites = Array.isArray(f.callSites) ? f.callSites.filter(isCallSite) : [];
+  if (sites.length === 0) return '';
+  const rendered = sites.map((s) => `\`${escapeCell(s.filePath)}:${s.startLine}\``).join(', ');
+  const total = typeof f.consumerD1Count === 'number' ? f.consumerD1Count : sites.length;
+  const more = total > sites.length ? ` (+${total - sites.length} more)` : '';
+  return ` — called from ${rendered}${more}`;
+}
+
+/**
+ * Runtime guard for a well-formed call site off the shallow-validated
+ * envelope. Requires a POSITIVE finite line — the Hub coerces unknown lines
+ * to 0, and rendering `file.ts:0` would be an invalid, misleading reference.
+ */
+function isCallSite(s: unknown): s is { filePath: string; startLine: number } {
+  if (typeof s !== 'object' || s === null) return false;
+  const { filePath, startLine } = s as { filePath?: unknown; startLine?: unknown };
+  return (
+    typeof filePath === 'string' &&
+    filePath.length > 0 &&
+    typeof startLine === 'number' &&
+    Number.isFinite(startLine) &&
+    startLine > 0
+  );
 }
 
 /** Distinct, non-empty consumer repos in Hub-emit order (for the verdict clause). */
