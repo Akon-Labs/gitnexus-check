@@ -312,7 +312,7 @@ async function scanExistingFindingComments(
       if (typeof comment.body !== 'string') continue;
       if (!isOwnedComment(comment.user, ctx.actorLogin)) continue;
       const fp = findingFingerprintFromBody(comment.body);
-      if (fp && !map.has(fp)) {
+      if (fp) {
         const entry: ExistingFindingComment = { id: comment.id, body: comment.body };
         if (typeof comment.path === 'string') entry.path = comment.path;
         // A review comment API row carries `line` (NEW side) and falls back to
