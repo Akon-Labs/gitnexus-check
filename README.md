@@ -176,7 +176,7 @@ narrow what the Hub already produced.
 ```yaml
 - uses: Akon-Labs/gitnexus-check@release
   with:
-    hub-url: https://app.akonlabs.com
+    hub-url: https://api-staging.akonlabs.com
     token: ${{ secrets.GITNEXUS_TOKEN }}
     inline-findings: true
 ```
