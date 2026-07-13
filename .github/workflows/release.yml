@@ -1,0 +1,97 @@
+name: Cut Release
+
+# Manually triggered from the Actions tab (or `gh workflow run`).
+# It moves the floating `release` tag to the latest commit on main,
+# creates a new immutable version tag (vX.Y.Z) on that same commit,
+# and publishes a GitHub Release pointing at the new version tag.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Explicit version to release (e.g. v1.0.7). Leave blank to auto-bump."
+        required: false
+        default: ""
+      bump:
+        description: "How to bump when 'version' is blank."
+        required: false
+        default: "patch"
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      prerelease:
+        description: "Mark this release as a pre-release."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main (full history + tags)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Determine version
+        id: ver
+        run: |
+          set -euo pipefail
+          input="${{ github.event.inputs.version }}"
+          if [ -n "$input" ]; then
+            new="$input"
+            case "$new" in v*) ;; *) new="v$new";; esac
+          else
+            latest=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+            [ -z "$latest" ] && latest="v0.0.0"
+            ver="${latest#v}"
+            IFS='.' read -r major minor patch <<< "$ver"
+            case "${{ github.event.inputs.bump }}" in
+              major) major=$((major+1)); minor=0; patch=0 ;;
+              minor) minor=$((minor+1)); patch=0 ;;
+              patch|*) patch=$((patch+1)) ;;
+            esac
+            new="v${major}.${minor}.${patch}"
+          fi
+          if git rev-parse -q --verify "refs/tags/${new}" >/dev/null; then
+            echo "::error::Tag ${new} already exists. Pick a different version."
+            exit 1
+          fi
+          echo "version=${new}" >> "$GITHUB_OUTPUT"
+          echo "Releasing ${new} at commit ${GITHUB_SHA}"
+
+      - name: Move floating `release` tag to this commit
+        run: |
+          set -euo pipefail
+          git tag -f release "$GITHUB_SHA"
+          git push origin refs/tags/release --force
+
+      - name: Create new version tag on this commit
+        run: |
+          set -euo pipefail
+          git tag -a "${{ steps.ver.outputs.version }}" "$GITHUB_SHA" -m "Release ${{ steps.ver.outputs.version }}"
+          git push origin "refs/tags/${{ steps.ver.outputs.version }}"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${{ steps.ver.outputs.version }}" \
+            --title "${{ steps.ver.outputs.version }}" \
+            --target "$GITHUB_SHA" \
+            --generate-notes \
+            --latest \
+            ${{ github.event.inputs.prerelease == 'true' && '--prerelease' || '' }}

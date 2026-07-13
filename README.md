@@ -111,7 +111,7 @@ jobs:
     steps:
       - uses: Akon-Labs/gitnexus-check@release
         with:
-          hub-url: https://app.akonlabs.com
+          hub-url: https://api-staging.akonlabs.com
           token: ${{ secrets.GITNEXUS_TOKEN }}
 ```
 
@@ -151,7 +151,7 @@ check always has an explanation attached.
 ```yaml
 - uses: Akon-Labs/gitnexus-check@release
   with:
-    hub-url: https://app.akonlabs.com
+    hub-url: https://api-staging.akonlabs.com
     token: ${{ secrets.GITNEXUS_TOKEN }}
     fail-on-blast-level: CRITICAL   # block only on CRITICAL, omit for advisory
 ```
