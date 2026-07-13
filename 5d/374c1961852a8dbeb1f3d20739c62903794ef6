@@ -1,0 +1,19 @@
+dist/index.js
+  s_95bf8578770bcd::t_c783952538ac9d 35662
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "5d374c1961852a8dbeb1f3d20739c62903794ef6",
+  "prompts": {},
+  "sessions": {
+    "s_95bf8578770bcd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "dd3f7f4e-ed5f-49b5-8c23-627dc75c9255",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Abhinav Pandey <abhinavpandey1230@gmail.com>"
+    }
+  }
+}
