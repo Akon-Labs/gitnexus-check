@@ -468,7 +468,7 @@ function categorizeFinding(
       if (isHttpSymbolFinding(f)) {
         return {
           channel: 'HTTP routes',
-          display: `\`${escapeCell(httpContractLabel(f))}\`${renderCallSites(f, detail)}`,
+          display: `\`${escapeCell(httpContractLabel(f))}\`${tierNote(f)}${renderCallSites(f, detail)}`,
           style: 'bullet',
         };
       }
@@ -477,18 +477,22 @@ function categorizeFinding(
         : `\`${escapeCell(f.via)}\``;
       return {
         channel: 'Imported symbols',
-        display: `${base}${renderCallSites(f, detail)}`,
+        display: `${base}${tierNote(f)}${renderCallSites(f, detail)}`,
         style: 'bullet',
       };
     }
     case 'contract': {
       if (f.via.startsWith('http:')) {
-        return { channel: 'HTTP routes', display: `\`${escapeCell(f.via.slice(5))}\``, style: 'inline' };
+        return {
+          channel: 'HTTP routes',
+          display: `\`${escapeCell(f.via.slice(5))}\`${tierNote(f)}`,
+          style: 'inline',
+        };
       }
       if (f.via.startsWith('messaging:')) {
         return { channel: 'Messaging topics', display: `\`${escapeCell(f.via.slice(10))}\``, style: 'inline' };
       }
-      return { channel: 'Contracts', display: `\`${escapeCell(f.via)}\``, style: 'inline' };
+      return { channel: 'Contracts', display: `\`${escapeCell(f.via)}\`${tierNote(f)}`, style: 'inline' };
     }
     case 'flow': {
       // Malformed payloads reach here via the shallow trust-boundary cast, so
@@ -512,6 +516,15 @@ function categorizeFinding(
     default:
       return null;
   }
+}
+
+/**
+ * Provenance note for LLM-adjudicated couplings: the doctrine keeps them out
+ * of every gate, and the COMMENT must be equally honest — an LLM-guessed
+ * coupling never reads like a deterministically proven one.
+ */
+function tierNote(f: { detectionTier?: string }): string {
+  return f.detectionTier === 'llm_adjudicated' ? ' _(LLM-matched)_' : '';
 }
 
 /** True when a symbol edge's provider is an HTTP route (contract kind or via prefix). */

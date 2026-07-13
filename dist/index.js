@@ -34811,6 +34811,8 @@ const classify_error_1 = __nccwpck_require__(6042);
 const hub_client_1 = __nccwpck_require__(4162);
 const render_comment_1 = __nccwpck_require__(7323);
 const post_comment_1 = __nccwpck_require__(1229);
+const post_review_1 = __nccwpck_require__(2122);
+const render_findings_1 = __nccwpck_require__(4298);
 const gate_1 = __nccwpck_require__(1956);
 const slm_format_1 = __nccwpck_require__(8449);
 /**
@@ -34868,6 +34870,17 @@ async function main() {
     // detect the fork from the webhook payload up-front and degrade to log-only
     // (see §7) rather than failing the run after the Hub has done its work.
     const isFork = isForkPr(ctx.payload);
+    // Wave-2 inline-findings config. All narrowing-only; empty/unset inputs keep
+    // the feature OFF and the pre-Wave-2 behavior byte-identical.
+    const findingsCfg = readFindingsConfig();
+    // Gated draft-skip (Wave-2 trigger model): when inline findings are enabled
+    // AND the PR is still a draft, stay silent until it is marked ready — cubic's
+    // behavior. GATED behind inline-findings so existing users see no change (the
+    // Action posts the blast comment on drafts today). Exits BEFORE any Hub call.
+    if (findingsCfg.enabled && isDraftPr(ctx.payload)) {
+        core.info('PR is draft and inline-findings is enabled — skipping review until ready_for_review.');
+        return;
+    }
     core.info(`GitNexus Review — PR #${prNumber} (${fullName})`);
     // ── 2. Validate the gate threshold up-front so a typo fails fast,
     //        before any Hub round-trip. Empty input → advisory (null).
@@ -34982,6 +34995,77 @@ async function main() {
             core.warning(`since-last-commit comment skipped: ${(0, classify_error_1.classifyError)(err, 'github')}`);
         }
     }
+    // ── 6d. Best-effort inline findings (Wave 2). Posts line-anchored review
+    //        comments for anchored findings and demotes the rest into a fallback
+    //        section appended to the MAIN comment. This runs AFTER the main comment
+    //        and BEFORE the gate, and is strictly best-effort: any failure is
+    //        swallowed so it can NEVER fail the run or affect the gate (the gate
+    //        reads blastLevel only). The two outputs are set ALWAYS (0 when off).
+    //        Skipped entirely when the input is off, on fork PRs (read-only token),
+    //        when the Hub sent no findings envelope, or when the Hub reported a
+    //        findings error — in every skip case the main comment stays byte-identical.
+    let inlinePosted = 0;
+    let inlineSuppressed = 0;
+    const findings = blast.findings;
+    if (findingsCfg.enabled && !isFork && findings != null && findings.error === null) {
+        try {
+            const narrowed = narrowFindings(findings.items, findingsCfg);
+            inlineSuppressed = findings.suppressedCount + narrowed.suppressed;
+            const reconcile = await (0, post_review_1.reconcileFindings)({
+                client: (0, post_review_1.asReviewClient)(github.getOctokit(githubToken)),
+                owner,
+                repo,
+                prNumber,
+                analyzedSha: findings.analyzedSha,
+                items: narrowed.inline,
+            });
+            inlinePosted = reconcile.posted + reconcile.updated;
+            // Findings that couldn't be line-anchored, plus any that failed to post,
+            // render in the demoted fallback section of the MAIN comment. We only
+            // re-post (update) the main comment when there is something to demote, so
+            // the byte-identical main comment is preserved when there is not.
+            const fallbackItems = [...narrowed.demoted, ...reconcile.failed];
+            if (fallbackItems.length > 0 || findings.truncated) {
+                let section = (0, render_findings_1.renderFallbackSection)(fallbackItems);
+                // Surface the Hub's time-box marker — partial results must never
+                // read as complete ones.
+                if (findings.truncated) {
+                    const note = '_The findings stage hit its time budget — results may be partial._';
+                    section = section ? `${section}\n\n${note}` : note;
+                }
+                const composed = `${body.trimEnd()}\n\n${section}\n`;
+                if (section && composed.length <= GITHUB_COMMENT_HARD_CAP) {
+                    // Reuse §7's comment id when we have it — re-listing the thread to
+                    // rediscover our own comment is wasted API budget and a needless
+                    // race window on busy PRs.
+                    if (posted) {
+                        const octokit = github.getOctokit(githubToken);
+                        await octokit.rest.issues.updateComment({
+                            owner,
+                            repo,
+                            comment_id: posted.commentId,
+                            body: composed,
+                        });
+                    }
+                    else {
+                        await (0, post_comment_1.postOrUpdateComment)({
+                            client: (0, post_comment_1.asIssueCommentsClient)(github.getOctokit(githubToken)),
+                            owner,
+                            repo,
+                            prNumber,
+                            marker: render_comment_1.COMMENT_MARKER,
+                            body: composed,
+                        });
+                    }
+                }
+            }
+        }
+        catch (err) {
+            core.warning(`inline-findings skipped: ${(0, classify_error_1.classifyError)(err, 'github')}`);
+        }
+    }
+    core.setOutput('inline-findings-posted', String(inlinePosted));
+    core.setOutput('inline-findings-suppressed', String(inlineSuppressed));
     // ── 9. Gate — the only success-path setFailed, evaluated after the
     //        report is posted or logged so reviewers know where to find it.
     const decision = (0, gate_1.evaluateGate)({ blastLevel: blast.blastLevel, threshold });
@@ -34994,6 +35078,62 @@ async function main() {
 }
 /** SHA shape guard — 7..40 hex. Used to degrade a malformed head sha to undefined. */
 const SHA_RE = /^[0-9a-f]{7,40}$/i;
+/**
+ * GitHub's hard cap on an issue-comment body is 65,536 chars. The main comment
+ * targets CHAR_BUDGET (60,000), leaving headroom for an appended fallback
+ * section; we still guard the composed length so a pathological case skips the
+ * append rather than 422-ing the update.
+ */
+const GITHUB_COMMENT_HARD_CAP = 65_000;
+/**
+ * @brief: Read the Wave-2 inline-findings inputs, all narrowing-only. Defaults
+ *         (empty inputs, as in unit tests) keep the feature OFF: `enabled` false,
+ *         `maxItems` 10, `severityFloor` 'warning'. `max-inline-findings` is
+ *         clamped to a positive integer; `inline-severity-floor` accepts only
+ *         'error' to raise the floor, anything else (incl. '') stays 'warning'.
+ *
+ * @returns: { enabled, maxItems, severityFloor } — the resolved findings config.
+ */
+function readFindingsConfig() {
+    const enabled = core.getInput('inline-findings').trim().toLowerCase() === 'true';
+    const parsedMax = Number.parseInt(core.getInput('max-inline-findings').trim(), 10);
+    const maxItems = Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : 10;
+    const severityFloor = core.getInput('inline-severity-floor').trim().toLowerCase() === 'error' ? 'error' : 'warning';
+    return { enabled, maxItems, severityFloor };
+}
+/** True when the PR payload marks this PR as a draft. Never throws. */
+function isDraftPr(payload) {
+    return payload?.pull_request?.draft === true;
+}
+/** Total order over finding severities so a floor comparison is a numeric `>=`. */
+function severityRank(severity) {
+    return severity === 'error' ? 1 : 0;
+}
+/**
+ * @brief: Narrow a Hub findings list by the Action's severity floor and inline
+ *         cap (narrowing-only — never surfaces more than the Hub sent). Splits
+ *         the floor-passing items into the anchored set to post inline (capped)
+ *         and the demoted set (anchored:false) for the fallback section, and
+ *         counts what the Action suppressed (below-floor + over-cap) so the
+ *         caller can add it to the Hub's suppressedCount.
+ *
+ * @params: (items) -> The normalised Hub findings items.
+ * @params: (cfg)   -> { maxItems, severityFloor }.
+ * @returns: { inline, demoted, suppressed } — inline posts, fallback items, suppressed count.
+ */
+function narrowFindings(items, cfg) {
+    const floor = severityRank(cfg.severityFloor);
+    const afterFloor = items.filter((it) => severityRank(it.severity) >= floor);
+    const floorSuppressed = items.length - afterFloor.length;
+    const anchored = afterFloor.filter((it) => it.anchored && it.anchor != null);
+    const demoted = afterFloor.filter((it) => !(it.anchored && it.anchor != null));
+    const inline = anchored.slice(0, cfg.maxItems);
+    // Over-cap anchored items DEMOTE to the fallback section rather than
+    // vanish — the narrowing knob bounds inline noise, it must not hide
+    // findings entirely.
+    const overCap = anchored.slice(cfg.maxItems);
+    return { inline, demoted: [...demoted, ...overCap], suppressed: floorSuppressed };
+}
 /**
  * @brief: Read the PR head commit SHA from the webhook payload, degrading to
  *         undefined when it is absent or fails the SHA shape guard. Never throws
@@ -35098,6 +35238,7 @@ if (process.env.VITEST !== 'true') {
  */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.postOrUpdateComment = postOrUpdateComment;
+exports.isBotAuthor = isBotAuthor;
 exports.asIssueCommentsClient = asIssueCommentsClient;
 /** Cap on pages we'll scan before giving up and creating a new comment. */
 const MAX_PAGES = 10;
@@ -35191,7 +35332,25 @@ async function findExistingCommentId(opts) {
 function isAdoptableBotComment(comment, marker) {
     if (typeof comment.body !== 'string' || !comment.body.includes(marker))
         return false;
-    const user = comment.user;
+    return isBotAuthor(comment.user);
+}
+/**
+ * @brief: True when a comment's author is a bot we may safely adopt. A comment's
+ *         `user.type` is set by GitHub and cannot be forged, so gating on
+ *         `type === 'Bot'` stops a human commenter from planting one of our
+ *         public markers to hijack (or suppress) a comment slot — a human's type
+ *         is `'User'`. The login is matched by the `[bot]` suffix rather than a
+ *         fixed `github-actions[bot]` so a run configured with a GitHub App
+ *         installation token (author `<app>[bot]`) still adopts its own comment.
+ *
+ *         Exported so the review-comment reconciler (post-review.ts) applies the
+ *         IDENTICAL bot-identity semantics when scanning review comments for our
+ *         finding markers — one predicate, no drift.
+ *
+ * @params: (user) -> The GitHub-set author identity off a comment.
+ * @returns: boolean — true iff the author is a `[bot]`-suffixed Bot.
+ */
+function isBotAuthor(user) {
     return (user?.type === 'Bot' && typeof user.login === 'string' && user.login.endsWith('[bot]'));
 }
 function validateInputs(opts) {
@@ -35232,6 +35391,267 @@ function asIssueCommentsClient(octokit) {
             issues: {
                 createComment: (params) => octokit.rest.issues.createComment(params),
                 updateComment: (params) => octokit.rest.issues.updateComment(params),
+            },
+        },
+    };
+}
+
+
+/***/ }),
+
+/***/ 2122:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+/**
+ * @brief: Wave-2 inline-findings reconciler. Posts line-anchored PR *review*
+ *         comments for anchored findings and keeps them in sync across re-runs,
+ *         REST-only (no GraphQL). Reconcile v1:
+ *           1. Delete any bot-owned PENDING review left by a crashed prior run.
+ *           2. Scan existing BOT-authored review comments for our finding markers.
+ *           3. PATCH comments whose rendered body changed; leave unchanged ones.
+ *           4. Batch the genuinely new findings into ONE review
+ *              (event 'COMMENT', commit_id = analyzedSha — MANDATORY, never
+ *              default-latest, which a concurrent push would mis-anchor).
+ *           5. Failure ladder: a batch 422 (one bad anchor rejects the whole
+ *              review) retries each comment as its own single-comment review;
+ *              survivors that still fail are returned for the MAIN comment's
+ *              fallback section.
+ *         Never throws — the caller's findings block is best-effort and must
+ *         never fail the run or affect the gate. Token handling: the GITHUB_TOKEN
+ *         flows through `@actions/github` and is never read, logged, or formatted
+ *         here.
+ *
+ *         The bot-identity filter (only OUR bot's comments are adoptable) reuses
+ *         `isBotAuthor` from post-comment.ts verbatim so a human cannot plant a
+ *         finding marker to hijack or suppress a review comment.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.reconcileFindings = reconcileFindings;
+exports.asReviewClient = asReviewClient;
+const post_comment_1 = __nccwpck_require__(1229);
+const render_findings_1 = __nccwpck_require__(4298);
+/** Cap on pages we scan before giving up (mirrors post-comment.ts). */
+const MAX_PAGES = 10;
+const PER_PAGE = 100;
+/**
+ * @brief: Reconcile the anchored findings into PR review comments. Returns the
+ *         count posted, the count updated in place, and the findings whose
+ *         inline post could not happen (for the fallback section). Never throws.
+ *
+ * @params: (opts.client)       -> Narrowed review client (asReviewClient).
+ * @params: (opts.owner/repo)   -> Repo coordinates.
+ * @params: (opts.prNumber)     -> PR number (pull_number to GitHub).
+ * @params: (opts.analyzedSha)  -> The commit the anchors are valid at; the review
+ *                                 commit_id. Null → nothing is posted (all → fallback).
+ * @params: (opts.items)        -> Candidate findings; only anchored ones are posted.
+ *
+ * @returns: ReconcileResult — { posted, updated, failed[] }.
+ */
+async function reconcileFindings(opts) {
+    const result = { posted: 0, updated: 0, failed: [] };
+    // Only anchored items with a valid NEW-side line are postable inline; anything
+    // else is the caller's fallback-section responsibility and never reaches here.
+    const postable = opts.items.filter((it) => it.anchored && it.anchor);
+    if (postable.length === 0)
+        return result;
+    // commit_id is MANDATORY — never default-latest (a concurrent push would
+    // mis-anchor every comment). With no analyzedSha we cannot post safely, so
+    // every finding degrades to the fallback section.
+    if (!opts.analyzedSha) {
+        result.failed.push(...postable);
+        return result;
+    }
+    const ctx = {
+        client: opts.client,
+        owner: opts.owner,
+        repo: opts.repo,
+        prNumber: opts.prNumber,
+        analyzedSha: opts.analyzedSha,
+    };
+    try {
+        // 1. Clear any leftover bot-owned PENDING review (best-effort).
+        await deletePendingBotReviews(ctx);
+        // 2. Map our existing finding comments by fingerprint (throws only on a real
+        //    list failure — an empty PR legitimately yields an empty map).
+        const existing = await scanExistingFindingComments(ctx);
+        // 3. PATCH changed bodies; collect genuinely new findings.
+        const toCreate = [];
+        for (const item of postable) {
+            const body = (0, render_findings_1.renderFindingComment)(item);
+            const match = existing.get(item.fingerprint);
+            if (!match) {
+                toCreate.push(item);
+                continue;
+            }
+            if (match.body === body)
+                continue; // unchanged → no-op
+            try {
+                await ctx.client.rest.pulls.updateReviewComment({
+                    owner: ctx.owner,
+                    repo: ctx.repo,
+                    comment_id: match.id,
+                    body,
+                });
+                result.updated += 1;
+            }
+            catch {
+                // A failed PATCH leaves the (stale) comment visible inline; do NOT also
+                // demote it to the fallback section (that would double-report it).
+            }
+        }
+        // 4 + 5. Batch-create the new findings; ladder down to per-comment on 422.
+        if (toCreate.length > 0) {
+            await createReviewBatch(ctx, toCreate, result);
+        }
+    }
+    catch {
+        // A real failure before any post (e.g. listing threw) must never throw out
+        // of the reconciler. Degrade every not-yet-posted finding to the fallback
+        // section — guarded so we never double-report something already posted.
+        if (result.posted === 0 && result.updated === 0) {
+            result.failed = [...result.failed, ...postable];
+        }
+    }
+    return result;
+}
+/**
+ * @brief: Delete any bot-owned PENDING review (one PENDING per user/PR) left by a
+ *         crashed prior run, so createReview does not 422 on "already has a
+ *         pending review". Best-effort: a failure here is swallowed and the
+ *         create ladder handles any resulting 422.
+ */
+async function deletePendingBotReviews(ctx) {
+    try {
+        const res = await ctx.client.rest.pulls.listReviews({
+            owner: ctx.owner,
+            repo: ctx.repo,
+            pull_number: ctx.prNumber,
+            per_page: PER_PAGE,
+        });
+        for (const review of res.data) {
+            if (review.state !== 'PENDING' || !(0, post_comment_1.isBotAuthor)(review.user))
+                continue;
+            try {
+                await ctx.client.rest.pulls.deletePendingReview({
+                    owner: ctx.owner,
+                    repo: ctx.repo,
+                    pull_number: ctx.prNumber,
+                    review_id: review.id,
+                });
+            }
+            catch {
+                // best-effort cleanup
+            }
+        }
+    }
+    catch {
+        // listing reviews failed — skip cleanup and continue.
+    }
+}
+/**
+ * @brief: Page the PR's review comments and map fingerprint → { id, body } for
+ *         every BOT-authored comment carrying a finding marker. The bot-identity
+ *         filter (isBotAuthor) means a human-planted marker is ignored, so a
+ *         commenter cannot hijack or suppress a finding thread. May throw on a
+ *         genuine list failure (caught by the caller, which then degrades to the
+ *         fallback section); an empty PR simply yields an empty map.
+ */
+async function scanExistingFindingComments(ctx) {
+    const map = new Map();
+    const iterator = ctx.client.paginate.iterator('GET /repos/{owner}/{repo}/pulls/{pull_number}/comments', {
+        owner: ctx.owner,
+        repo: ctx.repo,
+        pull_number: ctx.prNumber,
+        per_page: PER_PAGE,
+    });
+    let pages = 0;
+    for await (const page of iterator) {
+        pages += 1;
+        for (const comment of page.data) {
+            if (typeof comment.body !== 'string')
+                continue;
+            if (!(0, post_comment_1.isBotAuthor)(comment.user))
+                continue;
+            const fp = (0, render_findings_1.findingFingerprintFromBody)(comment.body);
+            if (fp && !map.has(fp))
+                map.set(fp, { id: comment.id, body: comment.body });
+        }
+        if (pages >= MAX_PAGES)
+            break;
+    }
+    return map;
+}
+/**
+ * @brief: Post the new findings as ONE batched review. On a batch failure
+ *         (typically 422 — a single bad anchor rejects the whole review, so
+ *         nothing was posted) retry each finding as its own single-comment
+ *         review: good anchors survive, the rest are pushed to result.failed for
+ *         the fallback section. Never throws.
+ */
+async function createReviewBatch(ctx, toCreate, result) {
+    try {
+        await ctx.client.rest.pulls.createReview({
+            owner: ctx.owner,
+            repo: ctx.repo,
+            pull_number: ctx.prNumber,
+            commit_id: ctx.analyzedSha,
+            event: 'COMMENT',
+            comments: toCreate.map(toReviewComment),
+        });
+        result.posted += toCreate.length;
+        return;
+    }
+    catch {
+        // Batch rejected — fall through to per-comment retries.
+    }
+    for (const item of toCreate) {
+        try {
+            await ctx.client.rest.pulls.createReview({
+                owner: ctx.owner,
+                repo: ctx.repo,
+                pull_number: ctx.prNumber,
+                commit_id: ctx.analyzedSha,
+                event: 'COMMENT',
+                comments: [toReviewComment(item)],
+            });
+            result.posted += 1;
+        }
+        catch {
+            result.failed.push(item);
+        }
+    }
+}
+/** Map a finding to a single-line NEW-side review comment. Anchor is guaranteed present. */
+function toReviewComment(item) {
+    return {
+        path: item.path,
+        line: item.anchor.startLine,
+        side: 'RIGHT',
+        body: (0, render_findings_1.renderFindingComment)(item),
+    };
+}
+/**
+ * @brief: Adapt a full Octokit instance into the narrowed ReviewClient shape, so
+ *         main.ts is the only file touching the broader Octokit surface and the
+ *         reconciler stays test-friendly with a hand-rolled mock (mirrors
+ *         asIssueCommentsClient in post-comment.ts).
+ *
+ * @params: (octokit) -> Auth'd Octokit from github.getOctokit.
+ * @returns: ReviewClient — narrowed client for the reconciler to use.
+ */
+function asReviewClient(octokit) {
+    return {
+        paginate: {
+            iterator: (route, params) => octokit.paginate.iterator(route, params),
+        },
+        rest: {
+            pulls: {
+                listReviews: (params) => octokit.rest.pulls.listReviews(params),
+                createReview: (params) => octokit.rest.pulls.createReview(params),
+                updateReviewComment: (params) => octokit.rest.pulls.updateReviewComment(params),
+                deletePendingReview: (params) => octokit.rest.pulls.deletePendingReview(params),
             },
         },
     };
@@ -35632,7 +36052,7 @@ function categorizeFinding(f, detail) {
             if (isHttpSymbolFinding(f)) {
                 return {
                     channel: 'HTTP routes',
-                    display: `\`${escapeCell(httpContractLabel(f))}\`${renderCallSites(f, detail)}`,
+                    display: `\`${escapeCell(httpContractLabel(f))}\`${tierNote(f)}${renderCallSites(f, detail)}`,
                     style: 'bullet',
                 };
             }
@@ -35641,18 +36061,22 @@ function categorizeFinding(f, detail) {
                 : `\`${escapeCell(f.via)}\``;
             return {
                 channel: 'Imported symbols',
-                display: `${base}${renderCallSites(f, detail)}`,
+                display: `${base}${tierNote(f)}${renderCallSites(f, detail)}`,
                 style: 'bullet',
             };
         }
         case 'contract': {
             if (f.via.startsWith('http:')) {
-                return { channel: 'HTTP routes', display: `\`${escapeCell(f.via.slice(5))}\``, style: 'inline' };
+                return {
+                    channel: 'HTTP routes',
+                    display: `\`${escapeCell(f.via.slice(5))}\`${tierNote(f)}`,
+                    style: 'inline',
+                };
             }
             if (f.via.startsWith('messaging:')) {
                 return { channel: 'Messaging topics', display: `\`${escapeCell(f.via.slice(10))}\``, style: 'inline' };
             }
-            return { channel: 'Contracts', display: `\`${escapeCell(f.via)}\``, style: 'inline' };
+            return { channel: 'Contracts', display: `\`${escapeCell(f.via)}\`${tierNote(f)}`, style: 'inline' };
         }
         case 'flow': {
             // Malformed payloads reach here via the shallow trust-boundary cast, so
@@ -35674,6 +36098,14 @@ function categorizeFinding(f, detail) {
         default:
             return null;
     }
+}
+/**
+ * Provenance note for LLM-adjudicated couplings: the doctrine keeps them out
+ * of every gate, and the COMMENT must be equally honest — an LLM-guessed
+ * coupling never reads like a deterministically proven one.
+ */
+function tierNote(f) {
+    return f.detectionTier === 'llm_adjudicated' ? ' _(LLM-matched)_' : '';
 }
 /** True when a symbol edge's provider is an HTTP route (contract kind or via prefix). */
 function isHttpSymbolFinding(f) {
@@ -36136,6 +36568,212 @@ function escapeCell(value) {
 
 /***/ }),
 
+/***/ 4298:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+/**
+ * @brief: Pure markdown renderers for the Wave-2 inline findings. Two surfaces:
+ *         `renderFindingComment` produces one line-anchored PR *review* comment
+ *         body per anchored finding (carrying a hidden fingerprint marker so a
+ *         re-run reconciles in place), and `renderFallbackSection` produces the
+ *         demoted section appended to the MAIN comment for findings that could
+ *         not be anchored or failed to post. No I/O, no `core.*` — deterministic
+ *         and fully fixture-testable, mirroring render-comment.ts.
+ *
+ *         Trust model: the Hub sanitizes title/rationale at source (its LLM
+ *         gates). The Action is defence-in-depth — it additionally escapes
+ *         anything it interpolates into markdown *structure* (HTML-comment
+ *         delimiters that could clone/close our markers, `@`-mentions that could
+ *         ping, and — critically — triple-backtick runs) and NEVER renders a
+ *         committable suggestion fence in Wave 2.
+ */
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.findingMarker = findingMarker;
+exports.findingFingerprintFromBody = findingFingerprintFromBody;
+exports.renderFindingComment = renderFindingComment;
+exports.renderFallbackSection = renderFallbackSection;
+/** Marker prefix embedded (as an HTML comment) at the top of every finding review comment. */
+const FINDING_MARKER_PREFIX = '<!-- gitnexus-finding:v1:';
+/** Max known-caller rows rendered inside one finding comment before a "+N more" trailer. */
+const MAX_CALLERS = 5;
+/** Default cap on fallback items and per-item rationale length (keeps the section budget-bounded). */
+const FALLBACK_MAX_ITEMS = 10;
+const FALLBACK_RATIONALE_CHARS = 200;
+/**
+ * @brief: Build the hidden marker embedded in a finding's review-comment body.
+ *         The fingerprint round-trips through `findingFingerprintFromBody` so a
+ *         later run can PATCH the same comment instead of duplicating it. Shared
+ *         by the renderer, the reconciler (post-review.ts), and the tests so the
+ *         scheme stays consistent.
+ *
+ * @params: (fingerprint: string) -> The finding's stable fingerprint.
+ * @returns: string — `<!-- gitnexus-finding:v1:<fingerprint> -->`.
+ */
+function findingMarker(fingerprint) {
+    return `${FINDING_MARKER_PREFIX}${fingerprint} -->`;
+}
+/** Matches a finding marker and captures its fingerprint (no whitespace in a fingerprint). */
+const FINDING_MARKER_RE = /<!-- gitnexus-finding:v1:(\S+) -->/;
+/**
+ * @brief: Extract the finding fingerprint from a comment body, or null when the
+ *         body carries no finding marker. Used by the reconciler to map an
+ *         existing bot-authored review comment back to its finding.
+ *
+ * @params: (body: string) -> A review-comment body.
+ * @returns: string | null — the fingerprint, or null.
+ */
+function findingFingerprintFromBody(body) {
+    const m = FINDING_MARKER_RE.exec(body);
+    return m ? m[1] : null;
+}
+/**
+ * @brief: Render one finding as a PR review-comment body: the hidden fingerprint
+ *         marker, a severity badge + title, the rationale prose, an optional
+ *         known-callers list (deterministic findings only, capped), and a
+ *         one-line "why this matters" footer naming GitNexus. Never emits a code
+ *         fence, so no committable suggestion can be produced in Wave 2.
+ *
+ * @params: (item: FindingItem) -> A normalised finding (post-normalizeFindings).
+ * @returns: string — the review-comment markdown body.
+ */
+function renderFindingComment(item) {
+    const lines = [];
+    lines.push(findingMarker(item.fingerprint));
+    lines.push('');
+    lines.push(`${severityBadge(item.severity)} — ${escapeInline(item.title)}`);
+    lines.push('');
+    const rationale = sanitizeProse(item.rationale);
+    if (rationale.length > 0) {
+        lines.push(rationale);
+        lines.push('');
+    }
+    // Deterministic findings can prove who calls the changed symbol — list the
+    // known callers (capped) so the reviewer sees who this change reaches.
+    if (item.origin === 'deterministic' && item.callers && item.callers.length > 0) {
+        lines.push('**Known callers** (not updated by this PR):');
+        for (const c of item.callers.slice(0, MAX_CALLERS)) {
+            lines.push(`- \`${callerLoc(c)}\``);
+        }
+        const hidden = item.callers.length - MAX_CALLERS;
+        if (hidden > 0)
+            lines.push(`- _(+${hidden} more)_`);
+        lines.push('');
+    }
+    lines.push(footer(item));
+    return lines.join('\n');
+}
+/**
+ * @brief: Render the demoted "Findings not shown inline" section for the MAIN
+ *         comment: findings that are `anchored: false` or whose inline post
+ *         failed. Sorted most-severe first (errors before warnings, then by
+ *         confidence), capped, with a "+N more" trailer and per-item rationale
+ *         truncation so the section stays budget-bounded (it rides high in the
+ *         main comment's truncation ladder, adjacent to the gate narrative).
+ *         Returns '' when there is nothing to demote.
+ *
+ * @params: (items: FindingItem[]) -> Demoted / failed findings.
+ * @params: (opts.maxItems?)       -> Override the item cap (default FALLBACK_MAX_ITEMS).
+ * @returns: string — the markdown section, or '' when empty.
+ */
+function renderFallbackSection(items, opts) {
+    if (items.length === 0)
+        return '';
+    const max = opts?.maxItems ?? FALLBACK_MAX_ITEMS;
+    const sorted = [...items].sort(bySeverityThenConfidence);
+    const shown = sorted.slice(0, max);
+    const lines = [];
+    lines.push('## Findings not shown inline');
+    lines.push('');
+    lines.push(`${items.length} GitNexus finding${items.length === 1 ? '' : 's'} could not be anchored ` +
+        `to a line in this PR's diff and ${items.length === 1 ? 'is' : 'are'} summarized here:`);
+    lines.push('');
+    for (const item of shown) {
+        lines.push(`- ${renderFallbackItem(item)}`);
+    }
+    const hidden = sorted.length - shown.length;
+    if (hidden > 0) {
+        lines.push(`- _(+${hidden} more finding${hidden === 1 ? '' : 's'})_`);
+    }
+    return lines.join('\n');
+}
+/** One fallback bullet: badge + title + `path`(:line) + a truncated rationale tail. */
+function renderFallbackItem(item) {
+    const badge = item.severity === 'error' ? '🔴' : '🟡';
+    const loc = item.anchor
+        ? `${escapeCode(item.path)}:${item.anchor.startLine}`
+        : escapeCode(item.path);
+    const rationale = truncate(escapeInline(item.rationale), FALLBACK_RATIONALE_CHARS);
+    const tail = rationale.length > 0 ? ` — ${rationale}` : '';
+    return `${badge} **${escapeInline(item.title)}** — \`${loc}\`${tail}`;
+}
+/** Severity → emoji + bold label for the finding badge. */
+function severityBadge(severity) {
+    return severity === 'error' ? '🔴 **Error**' : '🟡 **Warning**';
+}
+/** `path:line` for a known caller, dropping the suffix when the line is absent. */
+function callerLoc(c) {
+    const p = escapeCode(c.filePath);
+    return typeof c.startLine === 'number' ? `${p}:${c.startLine}` : p;
+}
+/** One-line "why this matters" footer, naming GitNexus and tagging the check id. */
+function footer(item) {
+    const tag = item.origin === 'deterministic'
+        ? 'GitNexus proved this from your code graph'
+        : 'GitNexus flagged this from your code graph';
+    const check = item.checkId ? ` · \`${escapeCode(item.checkId)}\`` : '';
+    return `_Why this matters: ${tag} — a caller or contract relies on what changed here._${check}`;
+}
+/** Order errors before warnings, then higher confidence first. */
+function bySeverityThenConfidence(a, b) {
+    const sa = a.severity === 'error' ? 0 : 1;
+    const sb = b.severity === 'error' ? 0 : 1;
+    if (sa !== sb)
+        return sa - sb;
+    return b.confidence - a.confidence;
+}
+/** Trim to `max` chars, ending with an ellipsis when clipped. */
+function truncate(text, max) {
+    if (text.length <= max)
+        return text;
+    return `${text.slice(0, max - 1).trimEnd()}…`;
+}
+/**
+ * @brief: Neutralise the markdown-structure vectors in Hub free text — HTML
+ *         comment delimiters (so text can't clone/close our markers), triple+
+ *         backtick runs (so no fenced or committable-suggestion block can form),
+ *         and `@`-mentions (so rationale can't ping people). Regular inline
+ *         markdown (single backticks, bold, lists) is preserved for readability.
+ */
+function neutralizeMarkup(text) {
+    return text
+        .replace(/<!--/g, '&lt;!--')
+        .replace(/-->/g, '--&gt;')
+        .replace(/`{3,}/g, '`')
+        .replace(/@(?=[A-Za-z0-9_-])/g, '&#64;');
+}
+/** Neutralise + collapse to a single line (for titles and bullet rationales). */
+function escapeInline(text) {
+    return neutralizeMarkup(text).replace(/\r?\n/g, ' ').trim();
+}
+/** Neutralise while preserving line breaks (for the multi-line rationale block). */
+function sanitizeProse(text) {
+    return neutralizeMarkup(text).trim();
+}
+/**
+ * @brief: Escape a value destined for an inline code span (`file:line`),
+ *         matching render-comment.ts's escapeCell semantics: backticks become
+ *         apostrophes (a single-` span can't contain a literal backtick), pipes
+ *         are escaped, newlines collapse to spaces.
+ */
+function escapeCode(value) {
+    return value.replace(/\|/g, '\\|').replace(/`/g, "'").replace(/\r?\n/g, ' ');
+}
+
+
+/***/ }),
+
 /***/ 8449:
 /***/ ((__unused_webpack_module, exports) => {
 
@@ -36298,6 +36936,7 @@ exports.EMPTY_CROSS_REPO = void 0;
 exports.isBlastResult = isBlastResult;
 exports.normalizeSinceLastCommit = normalizeSinceLastCommit;
 exports.normalizeBlastResult = normalizeBlastResult;
+exports.normalizeFindings = normalizeFindings;
 /**
  * @brief: Zero-state cross-repo envelope. Byte-matches the Hub's own
  *         zero-state literal in routes/blast.ts so an Action that fills a
@@ -36455,6 +37094,7 @@ function normalizeBlastResult(value) {
         crossRepo: normalizeCrossRepo(value.crossRepo),
         aiSummary: typeof value.aiSummary === 'string' ? value.aiSummary : null,
         sinceLastCommit: normalizeSinceLastCommit(value.sinceLastCommit),
+        findings: normalizeFindings(value.findings),
         truncated: Boolean(value.truncated),
         stale: Boolean(value.stale),
         prTitle: value.prTitle ?? null,
@@ -36515,6 +37155,152 @@ function normalizeCrossRepo(v) {
         result.notYetKnowable = v.notYetKnowable;
     }
     return result;
+}
+/**
+ * @brief: Coerce an unknown `findings` value into a well-formed FindingsResult,
+ *         or `undefined` when the feature is inert. Absent / non-object → undefined
+ *         (old Hubs: the Action does nothing). A `schemaVersion` other than '1'
+ *         degrades to an error envelope (empty items + `error`) so nothing is
+ *         posted inline. Otherwise every item is validated by
+ *         `normalizeFindingItem`; malformed items are dropped, never thrown on.
+ *
+ *         This is the sole type gate for the findings envelope — mirroring the
+ *         `normalizeSinceLastCommit` / `normalizeCrossRepo` discipline. Call it on
+ *         the raw Hub `findings` field; `isBlastResult` intentionally does NOT
+ *         inspect findings (its semantics are unchanged across this addition).
+ *
+ * @params: (v: unknown) -> The `findings` field off a Hub response body.
+ *
+ * @returns: FindingsResult | undefined — the envelope, or undefined when inert.
+ */
+function normalizeFindings(v) {
+    // Absent, non-object, or an array (never a valid envelope) → feature inert.
+    if (!isObject(v) || Array.isArray(v))
+        return undefined;
+    const sv = typeof v.schemaVersion === 'string' ? v.schemaVersion : undefined;
+    if (sv !== undefined && sv !== '1') {
+        return {
+            schemaVersion: '1',
+            analyzedSha: normalizeAnalyzedSha(v.analyzedSha),
+            items: [],
+            suppressedCount: normalizeCount(v.suppressedCount),
+            truncated: Boolean(v.truncated),
+            error: 'unsupported findings schema',
+        };
+    }
+    const items = [];
+    if (Array.isArray(v.items)) {
+        for (const raw of v.items) {
+            const item = normalizeFindingItem(raw);
+            if (item)
+                items.push(item);
+        }
+    }
+    return {
+        schemaVersion: '1',
+        analyzedSha: normalizeAnalyzedSha(v.analyzedSha),
+        items,
+        suppressedCount: normalizeCount(v.suppressedCount),
+        truncated: Boolean(v.truncated),
+        error: typeof v.error === 'string' ? v.error : null,
+    };
+}
+/**
+ * @brief: Validate one findings item off the shallow-parsed envelope. Returns a
+ *         well-formed FindingItem or null (dropped). Requires the load-bearing
+ *         fields the Action needs to reconcile, post, and render: a non-empty
+ *         fingerprint (marker + reconcile key), a string checkId, a known
+ *         origin/severity, a finite confidence, non-empty title/path, a string
+ *         rationale, and a boolean anchored. An `anchored: true` item whose
+ *         anchor is missing or malformed is DEMOTED to `anchored: false` (it can
+ *         never be line-posted without a valid NEW-side line) so the fallback
+ *         section carries it instead of it being silently dropped.
+ */
+function normalizeFindingItem(v) {
+    if (!isObject(v))
+        return null;
+    const { fingerprint, checkId, origin, severity, confidence, title, rationale, path, anchored } = v;
+    if (typeof fingerprint !== 'string' || fingerprint.length === 0)
+        return null;
+    if (typeof checkId !== 'string')
+        return null;
+    if (origin !== 'deterministic' && origin !== 'generated')
+        return null;
+    if (severity !== 'warning' && severity !== 'error')
+        return null;
+    if (typeof confidence !== 'number' || !Number.isFinite(confidence))
+        return null;
+    if (typeof title !== 'string' || title.length === 0)
+        return null;
+    if (typeof rationale !== 'string')
+        return null;
+    if (typeof path !== 'string' || path.length === 0)
+        return null;
+    if (typeof anchored !== 'boolean')
+        return null;
+    const anchor = normalizeAnchor(v.anchor);
+    const item = {
+        fingerprint,
+        checkId,
+        origin,
+        severity,
+        confidence,
+        title,
+        rationale,
+        path,
+        // An anchored item with no valid anchor cannot be line-posted — demote it so
+        // the fallback section carries it rather than the Action losing it entirely.
+        anchored: anchored && anchor !== undefined,
+    };
+    if (anchor)
+        item.anchor = anchor;
+    if (typeof v.enclosingSymbol === 'string' && v.enclosingSymbol.length > 0) {
+        item.enclosingSymbol = v.enclosingSymbol;
+    }
+    const callers = normalizeCallers(v.callers);
+    if (callers.length > 0)
+        item.callers = callers;
+    if (typeof v.category === 'string' && v.category.length > 0)
+        item.category = v.category;
+    return item;
+}
+/** Validate a NEW-side anchor range; both lines must be positive and ordered. */
+function normalizeAnchor(v) {
+    if (!isObject(v))
+        return undefined;
+    const { startLine, endLine } = v;
+    if (typeof startLine !== 'number' || !Number.isFinite(startLine) || startLine <= 0) {
+        return undefined;
+    }
+    if (typeof endLine !== 'number' || !Number.isFinite(endLine) || endLine < startLine) {
+        return undefined;
+    }
+    return { startLine, endLine };
+}
+/** Validate the known-callers list; drop entries without a non-empty filePath. */
+function normalizeCallers(v) {
+    if (!Array.isArray(v))
+        return [];
+    const out = [];
+    for (const c of v) {
+        if (!isObject(c))
+            continue;
+        const { filePath, startLine } = c;
+        if (typeof filePath !== 'string' || filePath.length === 0)
+            continue;
+        out.push(typeof startLine === 'number' && Number.isFinite(startLine) && startLine > 0
+            ? { filePath, startLine }
+            : { filePath });
+    }
+    return out;
+}
+/** A non-empty analyzedSha string, else null (the review commit_id is mandatory). */
+function normalizeAnalyzedSha(v) {
+    return typeof v === 'string' && v.length > 0 ? v : null;
+}
+/** A non-negative integer count, else 0. */
+function normalizeCount(v) {
+    return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0;
 }
 function clampBlastLevel(v) {
     return v === 'LOW' || v === 'MEDIUM' || v === 'HIGH' || v === 'CRITICAL' ? v : 'LOW';

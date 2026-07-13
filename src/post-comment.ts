@@ -167,7 +167,26 @@ async function findExistingCommentId(opts: {
  */
 function isAdoptableBotComment(comment: ScannedComment, marker: string): boolean {
   if (typeof comment.body !== 'string' || !comment.body.includes(marker)) return false;
-  const user = comment.user;
+  return isBotAuthor(comment.user);
+}
+
+/**
+ * @brief: True when a comment's author is a bot we may safely adopt. A comment's
+ *         `user.type` is set by GitHub and cannot be forged, so gating on
+ *         `type === 'Bot'` stops a human commenter from planting one of our
+ *         public markers to hijack (or suppress) a comment slot — a human's type
+ *         is `'User'`. The login is matched by the `[bot]` suffix rather than a
+ *         fixed `github-actions[bot]` so a run configured with a GitHub App
+ *         installation token (author `<app>[bot]`) still adopts its own comment.
+ *
+ *         Exported so the review-comment reconciler (post-review.ts) applies the
+ *         IDENTICAL bot-identity semantics when scanning review comments for our
+ *         finding markers — one predicate, no drift.
+ *
+ * @params: (user) -> The GitHub-set author identity off a comment.
+ * @returns: boolean — true iff the author is a `[bot]`-suffixed Bot.
+ */
+export function isBotAuthor(user: { login?: string; type?: string } | null | undefined): boolean {
   return (
     user?.type === 'Bot' && typeof user.login === 'string' && user.login.endsWith('[bot]')
   );

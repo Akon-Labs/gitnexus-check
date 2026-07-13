@@ -16,6 +16,18 @@ inputs:
     description: 'Optional gate. Accepts LOW | MEDIUM | HIGH | CRITICAL. When set, the action fails the workflow if the PR blast level meets or exceeds this value (after posting the comment). Empty (default) is advisory and never fails.'
     required: false
     default: ''
+  inline-findings:
+    description: 'Opt-in inline review findings. When "true", the action posts line-anchored PR review comments for GitNexus findings (in addition to the main comment) and, while enabled, stays silent on draft PRs until they are marked ready. Default "false" keeps the pre-existing behavior unchanged.'
+    required: false
+    default: 'false'
+  max-inline-findings:
+    description: 'Cap on the number of inline review comments posted per run (narrowing only — never surfaces more than the Hub sent). Default 10.'
+    required: false
+    default: '10'
+  inline-severity-floor:
+    description: 'Minimum severity for an inline review comment: warning | error (narrowing only). "error" posts only error-severity findings inline. Default "warning".'
+    required: false
+    default: 'warning'
 outputs:
   comment-id:
     description: 'GitHub comment id we created or updated.'
@@ -23,6 +35,10 @@ outputs:
     description: 'Overall blast level returned by the Hub: LOW | MEDIUM | HIGH | CRITICAL.'
   gate-decision:
     description: 'Gate outcome: pass | fail | neutral. neutral means the gate was advisory (no fail-on-blast-level set).'
+  inline-findings-posted:
+    description: 'Number of inline review comments posted or updated this run (0 when inline-findings is off).'
+  inline-findings-suppressed:
+    description: 'Number of findings not surfaced inline: the Hub noise-budget suppressions plus any narrowed by the severity floor or the inline cap (0 when inline-findings is off).'
 runs:
   using: 'node20'
   main: 'dist/index.js'

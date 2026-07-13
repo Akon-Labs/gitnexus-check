@@ -18,8 +18,11 @@ import {
 } from './hub-client';
 import { renderComment, COMMENT_MARKER } from './render-comment';
 import { asIssueCommentsClient, postOrUpdateComment } from './post-comment';
+import { asReviewClient, reconcileFindings } from './post-review';
+import { renderFallbackSection } from './render-findings';
 import { parseThreshold, evaluateGate } from './gate';
 import { composeWithDigest, renderSinceCommitComment, sinceCommitMarker } from './slm-format';
+import type { FindingItem } from './types/blast-result';
 
 /**
  * @brief: Top-level orchestration. Sequence:
@@ -77,6 +80,19 @@ export async function main(): Promise<void> {
   // detect the fork from the webhook payload up-front and degrade to log-only
   // (see §7) rather than failing the run after the Hub has done its work.
   const isFork = isForkPr(ctx.payload);
+
+  // Wave-2 inline-findings config. All narrowing-only; empty/unset inputs keep
+  // the feature OFF and the pre-Wave-2 behavior byte-identical.
+  const findingsCfg = readFindingsConfig();
+
+  // Gated draft-skip (Wave-2 trigger model): when inline findings are enabled
+  // AND the PR is still a draft, stay silent until it is marked ready — cubic's
+  // behavior. GATED behind inline-findings so existing users see no change (the
+  // Action posts the blast comment on drafts today). Exits BEFORE any Hub call.
+  if (findingsCfg.enabled && isDraftPr(ctx.payload)) {
+    core.info('PR is draft and inline-findings is enabled — skipping review until ready_for_review.');
+    return;
+  }
 
   core.info(`GitNexus Review — PR #${prNumber} (${fullName})`);
 
@@ -198,6 +214,77 @@ export async function main(): Promise<void> {
     }
   }
 
+  // ── 6d. Best-effort inline findings (Wave 2). Posts line-anchored review
+  //        comments for anchored findings and demotes the rest into a fallback
+  //        section appended to the MAIN comment. This runs AFTER the main comment
+  //        and BEFORE the gate, and is strictly best-effort: any failure is
+  //        swallowed so it can NEVER fail the run or affect the gate (the gate
+  //        reads blastLevel only). The two outputs are set ALWAYS (0 when off).
+  //        Skipped entirely when the input is off, on fork PRs (read-only token),
+  //        when the Hub sent no findings envelope, or when the Hub reported a
+  //        findings error — in every skip case the main comment stays byte-identical.
+  let inlinePosted = 0;
+  let inlineSuppressed = 0;
+  const findings = blast.findings;
+  if (findingsCfg.enabled && !isFork && findings != null && findings.error === null) {
+    try {
+      const narrowed = narrowFindings(findings.items, findingsCfg);
+      inlineSuppressed = findings.suppressedCount + narrowed.suppressed;
+      const reconcile = await reconcileFindings({
+        client: asReviewClient(github.getOctokit(githubToken)),
+        owner,
+        repo,
+        prNumber,
+        analyzedSha: findings.analyzedSha,
+        items: narrowed.inline,
+      });
+      inlinePosted = reconcile.posted + reconcile.updated;
+
+      // Findings that couldn't be line-anchored, plus any that failed to post,
+      // render in the demoted fallback section of the MAIN comment. We only
+      // re-post (update) the main comment when there is something to demote, so
+      // the byte-identical main comment is preserved when there is not.
+      const fallbackItems = [...narrowed.demoted, ...reconcile.failed];
+      if (fallbackItems.length > 0 || findings.truncated) {
+        let section = renderFallbackSection(fallbackItems);
+        // Surface the Hub's time-box marker — partial results must never
+        // read as complete ones.
+        if (findings.truncated) {
+          const note = '_The findings stage hit its time budget — results may be partial._';
+          section = section ? `${section}\n\n${note}` : note;
+        }
+        const composed = `${body.trimEnd()}\n\n${section}\n`;
+        if (section && composed.length <= GITHUB_COMMENT_HARD_CAP) {
+          // Reuse §7's comment id when we have it — re-listing the thread to
+          // rediscover our own comment is wasted API budget and a needless
+          // race window on busy PRs.
+          if (posted) {
+            const octokit = github.getOctokit(githubToken);
+            await octokit.rest.issues.updateComment({
+              owner,
+              repo,
+              comment_id: posted.commentId,
+              body: composed,
+            });
+          } else {
+            await postOrUpdateComment({
+              client: asIssueCommentsClient(github.getOctokit(githubToken)),
+              owner,
+              repo,
+              prNumber,
+              marker: COMMENT_MARKER,
+              body: composed,
+            });
+          }
+        }
+      }
+    } catch (err) {
+      core.warning(`inline-findings skipped: ${classifyError(err, 'github')}`);
+    }
+  }
+  core.setOutput('inline-findings-posted', String(inlinePosted));
+  core.setOutput('inline-findings-suppressed', String(inlineSuppressed));
+
   // ── 9. Gate — the only success-path setFailed, evaluated after the
   //        report is posted or logged so reviewers know where to find it.
   const decision = evaluateGate({ blastLevel: blast.blastLevel, threshold });
@@ -213,6 +300,77 @@ export async function main(): Promise<void> {
 
 /** SHA shape guard — 7..40 hex. Used to degrade a malformed head sha to undefined. */
 const SHA_RE = /^[0-9a-f]{7,40}$/i;
+
+/**
+ * GitHub's hard cap on an issue-comment body is 65,536 chars. The main comment
+ * targets CHAR_BUDGET (60,000), leaving headroom for an appended fallback
+ * section; we still guard the composed length so a pathological case skips the
+ * append rather than 422-ing the update.
+ */
+const GITHUB_COMMENT_HARD_CAP = 65_000;
+
+/**
+ * @brief: Read the Wave-2 inline-findings inputs, all narrowing-only. Defaults
+ *         (empty inputs, as in unit tests) keep the feature OFF: `enabled` false,
+ *         `maxItems` 10, `severityFloor` 'warning'. `max-inline-findings` is
+ *         clamped to a positive integer; `inline-severity-floor` accepts only
+ *         'error' to raise the floor, anything else (incl. '') stays 'warning'.
+ *
+ * @returns: { enabled, maxItems, severityFloor } — the resolved findings config.
+ */
+function readFindingsConfig(): {
+  enabled: boolean;
+  maxItems: number;
+  severityFloor: 'warning' | 'error';
+} {
+  const enabled = core.getInput('inline-findings').trim().toLowerCase() === 'true';
+  const parsedMax = Number.parseInt(core.getInput('max-inline-findings').trim(), 10);
+  const maxItems = Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : 10;
+  const severityFloor =
+    core.getInput('inline-severity-floor').trim().toLowerCase() === 'error' ? 'error' : 'warning';
+  return { enabled, maxItems, severityFloor };
+}
+
+/** True when the PR payload marks this PR as a draft. Never throws. */
+function isDraftPr(payload: unknown): boolean {
+  return (payload as { pull_request?: { draft?: unknown } })?.pull_request?.draft === true;
+}
+
+/** Total order over finding severities so a floor comparison is a numeric `>=`. */
+function severityRank(severity: 'warning' | 'error'): number {
+  return severity === 'error' ? 1 : 0;
+}
+
+/**
+ * @brief: Narrow a Hub findings list by the Action's severity floor and inline
+ *         cap (narrowing-only — never surfaces more than the Hub sent). Splits
+ *         the floor-passing items into the anchored set to post inline (capped)
+ *         and the demoted set (anchored:false) for the fallback section, and
+ *         counts what the Action suppressed (below-floor + over-cap) so the
+ *         caller can add it to the Hub's suppressedCount.
+ *
+ * @params: (items) -> The normalised Hub findings items.
+ * @params: (cfg)   -> { maxItems, severityFloor }.
+ * @returns: { inline, demoted, suppressed } — inline posts, fallback items, suppressed count.
+ */
+function narrowFindings(
+  items: FindingItem[],
+  cfg: { maxItems: number; severityFloor: 'warning' | 'error' },
+): { inline: FindingItem[]; demoted: FindingItem[]; suppressed: number } {
+  const floor = severityRank(cfg.severityFloor);
+  const afterFloor = items.filter((it) => severityRank(it.severity) >= floor);
+  const floorSuppressed = items.length - afterFloor.length;
+
+  const anchored = afterFloor.filter((it) => it.anchored && it.anchor != null);
+  const demoted = afterFloor.filter((it) => !(it.anchored && it.anchor != null));
+  const inline = anchored.slice(0, cfg.maxItems);
+  // Over-cap anchored items DEMOTE to the fallback section rather than
+  // vanish — the narrowing knob bounds inline noise, it must not hide
+  // findings entirely.
+  const overCap = anchored.slice(cfg.maxItems);
+
+  return { inline, demoted: [...demoted, ...overCap], suppressed: floorSuppressed };
+}
 
 /**
  * @brief: Read the PR head commit SHA from the webhook payload, degrading to

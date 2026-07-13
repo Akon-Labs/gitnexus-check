@@ -5,6 +5,7 @@ import {
   isBlastResult,
   normalizeBlastResult,
   normalizeSinceLastCommit,
+  normalizeFindings,
   EMPTY_CROSS_REPO,
   type BlastResult,
 } from '../src/types/blast-result';
@@ -416,6 +417,181 @@ describe('crossRepo HTTP symbol tier through normalize', () => {
     } as unknown as BlastResult);
     expect(out.crossRepo?.error).toContain('unsupported crossRepo schema version: 9');
     expect(out.crossRepo?.notYetKnowable).toBeUndefined();
+  });
+});
+
+describe('normalizeFindings — Wave-2 inline findings envelope', () => {
+  const validItem = {
+    fingerprint: 'abc123',
+    checkId: 'removed-export-with-consumers',
+    origin: 'deterministic',
+    severity: 'error',
+    confidence: 1,
+    title: 'Removed export breaks external callers',
+    rationale: 'foo() is still imported by two other files.',
+    path: 'src/foo.ts',
+    anchored: true,
+    anchor: { startLine: 12, endLine: 14 },
+    enclosingSymbol: 'foo',
+    callers: [{ filePath: 'src/bar.ts', startLine: 8 }, { filePath: 'src/baz.ts' }],
+    category: 'correctness',
+  };
+
+  it('returns undefined for an absent / non-object findings value (feature inert)', () => {
+    expect(normalizeFindings(undefined)).toBeUndefined();
+    expect(normalizeFindings(null)).toBeUndefined();
+    expect(normalizeFindings('oops')).toBeUndefined();
+    expect(normalizeFindings(42)).toBeUndefined();
+    expect(normalizeFindings([])).toBeUndefined();
+  });
+
+  it('normalizes a valid envelope, preserving items verbatim', () => {
+    const out = normalizeFindings({
+      schemaVersion: '1',
+      analyzedSha: 'deadbeefcafe',
+      items: [validItem],
+      suppressedCount: 3,
+      truncated: false,
+      error: null,
+    });
+    expect(out).toBeDefined();
+    expect(out?.schemaVersion).toBe('1');
+    expect(out?.analyzedSha).toBe('deadbeefcafe');
+    expect(out?.suppressedCount).toBe(3);
+    expect(out?.truncated).toBe(false);
+    expect(out?.error).toBeNull();
+    expect(out?.items).toHaveLength(1);
+    expect(out?.items[0]).toEqual(validItem);
+  });
+
+  it('degrades an unknown schemaVersion to the error envelope (post nothing inline)', () => {
+    const out = normalizeFindings({
+      schemaVersion: '2',
+      analyzedSha: 'sha1',
+      items: [validItem],
+      suppressedCount: 5,
+      truncated: false,
+      error: null,
+    });
+    expect(out?.items).toEqual([]);
+    expect(out?.error).toBe('unsupported findings schema');
+    // analyzedSha + suppressedCount are still carried on the error envelope.
+    expect(out?.analyzedSha).toBe('sha1');
+    expect(out?.suppressedCount).toBe(5);
+  });
+
+  it('treats a missing schemaVersion as the current version (tolerant)', () => {
+    const out = normalizeFindings({ items: [validItem], analyzedSha: 'x' });
+    expect(out?.error).toBeNull();
+    expect(out?.items).toHaveLength(1);
+  });
+
+  it('drops malformed items but keeps the well-formed ones (never throws)', () => {
+    const out = normalizeFindings({
+      schemaVersion: '1',
+      analyzedSha: 'x',
+      items: [
+        validItem,
+        null,
+        'not-an-object',
+        { ...validItem, fingerprint: '' }, // empty fingerprint
+        { ...validItem, fingerprint: undefined }, // missing fingerprint
+        { ...validItem, severity: 'info' }, // unknown severity
+        { ...validItem, origin: 'human' }, // unknown origin
+        { ...validItem, confidence: 'high' }, // non-number confidence
+        { ...validItem, title: '' }, // empty title
+        { ...validItem, path: '' }, // empty path
+        { ...validItem, anchored: 'yes' }, // non-boolean anchored
+        { ...validItem, checkId: 5 }, // non-string checkId
+      ],
+    });
+    expect(out?.items).toHaveLength(1);
+    expect(out?.items[0].fingerprint).toBe('abc123');
+  });
+
+  it('demotes an anchored item with a missing / malformed anchor to anchored:false', () => {
+    const noAnchor = normalizeFindings({
+      schemaVersion: '1',
+      items: [{ ...validItem, anchored: true, anchor: undefined }],
+    });
+    expect(noAnchor?.items[0].anchored).toBe(false);
+    expect(noAnchor?.items[0].anchor).toBeUndefined();
+
+    const badRange = normalizeFindings({
+      schemaVersion: '1',
+      items: [{ ...validItem, anchored: true, anchor: { startLine: 9, endLine: 3 } }],
+    });
+    expect(badRange?.items[0].anchored).toBe(false);
+
+    const nonPositive = normalizeFindings({
+      schemaVersion: '1',
+      items: [{ ...validItem, anchored: true, anchor: { startLine: 0, endLine: 4 } }],
+    });
+    expect(nonPositive?.items[0].anchored).toBe(false);
+  });
+
+  it('keeps anchored:false as-is even when a valid anchor is present', () => {
+    const out = normalizeFindings({
+      schemaVersion: '1',
+      items: [{ ...validItem, anchored: false }],
+    });
+    expect(out?.items[0].anchored).toBe(false);
+    expect(out?.items[0].anchor).toEqual({ startLine: 12, endLine: 14 });
+  });
+
+  it('normalizes callers (drops empty filePath, keeps positive startLine only)', () => {
+    const out = normalizeFindings({
+      schemaVersion: '1',
+      items: [
+        {
+          ...validItem,
+          callers: [
+            { filePath: 'src/a.ts', startLine: 4 },
+            { filePath: '', startLine: 9 }, // dropped
+            { filePath: 'src/b.ts', startLine: 0 }, // line dropped, entry kept
+            { filePath: 'src/c.ts' },
+            'oops', // dropped
+          ],
+        },
+      ],
+    });
+    expect(out?.items[0].callers).toEqual([
+      { filePath: 'src/a.ts', startLine: 4 },
+      { filePath: 'src/b.ts' },
+      { filePath: 'src/c.ts' },
+    ]);
+  });
+
+  it('coerces suppressedCount and analyzedSha defensively', () => {
+    const out = normalizeFindings({
+      schemaVersion: '1',
+      analyzedSha: 42,
+      items: [],
+      suppressedCount: -3,
+      truncated: 'yes',
+    });
+    expect(out?.analyzedSha).toBeNull();
+    expect(out?.suppressedCount).toBe(0);
+    expect(out?.truncated).toBe(true);
+    expect(normalizeFindings({ schemaVersion: '1', suppressedCount: 2.9 })?.suppressedCount).toBe(2);
+  });
+
+  it('is wired into normalizeBlastResult (absent → undefined, present → carried)', () => {
+    const base = { blastLevel: 'HIGH', truncated: false, computedAt: 'x' } as unknown as BlastResult;
+    expect(normalizeBlastResult(base).findings).toBeUndefined();
+    const withFindings = normalizeBlastResult({
+      ...base,
+      findings: { schemaVersion: '1', analyzedSha: 'sha', items: [validItem], suppressedCount: 0, truncated: false, error: null },
+    } as unknown as BlastResult);
+    expect(withFindings.findings?.items).toHaveLength(1);
+    expect(withFindings.findings?.analyzedSha).toBe('sha');
+  });
+
+  it('leaves isBlastResult semantics unchanged (findings not inspected there)', () => {
+    const base = { blastLevel: 'LOW', truncated: false, computedAt: 'x' };
+    // A malformed findings value does NOT make isBlastResult reject — normalize is the gate.
+    expect(isBlastResult({ ...base, findings: 'oops' })).toBe(true);
+    expect(isBlastResult({ ...base, findings: { schemaVersion: '9' } })).toBe(true);
   });
 });
 
