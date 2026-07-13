@@ -35659,7 +35659,7 @@ async function scanExistingFindingComments(ctx) {
             if (!(0, post_comment_1.isOwnedComment)(comment.user, ctx.actorLogin))
                 continue;
             const fp = (0, render_findings_1.findingFingerprintFromBody)(comment.body);
-            if (fp && !map.has(fp)) {
+            if (fp) {
                 const entry = { id: comment.id, body: comment.body };
                 if (typeof comment.path === 'string')
                     entry.path = comment.path;
