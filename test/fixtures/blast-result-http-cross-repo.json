@@ -1,0 +1,170 @@
+{
+  "prNumber": 312,
+  "prTitle": "feat(hub): HTTP symbol tier",
+  "prAuthor": "abhinav",
+  "prBranch": "claude/w1-http-tier",
+  "prStatus": "open",
+  "blastLevel": "HIGH",
+  "changedSymbols": [
+    {
+      "id": "Route:gitnexus-hub/src/routes/blast.ts:refreshBlast",
+      "name": "refreshBlast",
+      "type": "Route",
+      "endLine": 88,
+      "filePath": "gitnexus-hub/src/routes/blast.ts",
+      "startLine": 42
+    }
+  ],
+  "d1Symbols": [],
+  "d2Symbols": [],
+  "d3Symbols": [],
+  "affectedFlows": [],
+  "affectedModules": [
+    {
+      "hits": 1,
+      "name": "Blast Radius",
+      "direct": true
+    }
+  ],
+  "changedFiles": [
+    {
+      "path": "gitnexus-hub/src/routes/blast.ts",
+      "status": "modified"
+    }
+  ],
+  "fileRiskLevel": "HIGH",
+  "riskFiles": [],
+  "graphData": {
+    "links": [],
+    "nodes": []
+  },
+  "crossRepo": {
+    "schemaVersion": "1",
+    "findings": [
+      {
+        "kind": "symbol",
+        "consumerRepo": "Akon-Labs/gitnexus-check",
+        "consumerSymbol": {
+          "name": "refreshPr",
+          "filePath": "src/hub-client.ts",
+          "startLine": 118
+        },
+        "providerSymbol": {
+          "name": "refreshBlast",
+          "filePath": "gitnexus-hub/src/routes/blast.ts",
+          "symbolLabel": "Route"
+        },
+        "via": "http:GET /api/repos/*/prs/*/refresh",
+        "edgeType": "FETCHES",
+        "detectionTier": "tier3_http_graph",
+        "confidence": 0.9,
+        "providerContract": { "kind": "http", "method": "GET", "path": "/api/repos/*/prs/*/refresh" },
+        "callSites": [
+          { "filePath": "src/hub-client.ts", "startLine": 118 },
+          { "filePath": "src/hub-client.ts", "startLine": 205 }
+        ],
+        "consumerD1Count": 4
+      },
+      {
+        "kind": "symbol",
+        "consumerRepo": "Akon-Labs/gitnexus-check",
+        "consumerSymbol": {
+          "name": "postComment",
+          "filePath": "src/hub-client.ts",
+          "startLine": 240
+        },
+        "providerSymbol": {
+          "name": "createRepo",
+          "filePath": "gitnexus-hub/src/routes/repos.ts",
+          "symbolLabel": "Route"
+        },
+        "via": "http:POST /api/repos",
+        "edgeType": "FETCHES",
+        "detectionTier": "tier3_http_regex",
+        "confidence": 0.7,
+        "providerContract": { "kind": "http", "method": "POST", "path": "/api/repos" },
+        "callSites": [{ "filePath": "src/hub-client.ts", "startLine": 240 }],
+        "consumerD1Count": 1
+      },
+      {
+        "kind": "symbol",
+        "consumerRepo": "Akon-Labs/gitnexus-check",
+        "consumerSymbol": {
+          "name": "getBlast",
+          "filePath": "src/hub-client.ts",
+          "startLine": 60
+        },
+        "providerSymbol": {
+          "name": "getBlastRoute",
+          "filePath": "gitnexus-hub/src/routes/blast.ts",
+          "symbolLabel": "Route"
+        },
+        "via": "declared:http:/api/repos/*/prs/*",
+        "edgeType": "FETCHES",
+        "detectionTier": "declared",
+        "confidence": 1.0,
+        "providerContract": { "kind": "http", "method": "GET", "path": "/api/repos/*/prs/*" },
+        "callSites": [{ "filePath": "src/hub-client.ts", "startLine": 60 }],
+        "consumerD1Count": 1
+      },
+      {
+        "kind": "symbol",
+        "consumerRepo": "Akon-Labs/gitnexus-check",
+        "consumerSymbol": {
+          "name": "listGroups",
+          "filePath": "src/hub-client.ts",
+          "startLine": 300
+        },
+        "providerSymbol": {
+          "name": "groupsHandler",
+          "filePath": "gitnexus-hub/src/routes/groups.ts",
+          "symbolLabel": "Route"
+        },
+        "via": "http:PUT /api/repos/*",
+        "edgeType": "FETCHES",
+        "detectionTier": "llm_adjudicated",
+        "confidence": 0.6,
+        "providerContract": { "kind": "http", "method": "PUT", "path": "/api/repos/*" },
+        "callSites": [{ "filePath": "src/hub-client.ts", "startLine": 300 }],
+        "consumerD1Count": 1
+      },
+      {
+        "kind": "symbol",
+        "consumerRepo": "Akon-Labs/gitnexus-check",
+        "consumerSymbol": {
+          "name": "BlastResult",
+          "filePath": "src/types/blast-result.ts",
+          "startLine": 217
+        },
+        "providerSymbol": {
+          "name": "PersistedBlastRow",
+          "filePath": "gitnexus-hub/src/services/blast-radius/upsert.ts",
+          "symbolLabel": "Interface"
+        },
+        "via": "imports BlastResult",
+        "edgeType": "IMPORTS",
+        "detectionTier": "static",
+        "confidence": 0.95,
+        "callSites": [{ "filePath": "src/render-comment.ts", "startLine": 12 }],
+        "consumerD1Count": 3
+      }
+    ],
+    "groups": [
+      {
+        "id": "grp-gnx",
+        "name": "GitNexus",
+        "lastAnalyzedAt": "2026-07-12T09:00:00.000Z",
+        "stale": false
+      }
+    ],
+    "truncated": false,
+    "error": null,
+    "notYetKnowable": [
+      { "name": "brandNewExport", "filePath": "gitnexus-hub/src/routes/blast.ts" },
+      { "name": "anotherNewExport", "filePath": "gitnexus-hub/src/routes/blast.ts" }
+    ]
+  },
+  "truncated": false,
+  "stale": false,
+  "computedAt": "2026-07-12T18:27:42.511Z"
+}

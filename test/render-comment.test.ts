@@ -552,6 +552,39 @@ describe('renderComment — crossRepo rendering', () => {
     expect(out).toContain('`checkout pipeline` (step 2 of 4)');
   });
 
+  it('appends the (LLM-matched) note on an llm_adjudicated flow finding', () => {
+    const blast = withFindings([
+      {
+        kind: 'flow',
+        consumerRepo: '',
+        via: 'checkout pipeline',
+        flow: { label: 'checkout pipeline', step: 2, stepCount: 4, repoIds: ['a', 'b'] },
+        edgeType: 'STEP_IN_CROSS_PROCESS',
+        detectionTier: 'llm_adjudicated',
+        confidence: 0.7,
+      },
+    ]);
+    const out = renderComment(blast, OPTS);
+    // A flow renders the LLM provenance note like symbol/contract findings do.
+    expect(out).toContain('`checkout pipeline` (step 2 of 4) _(LLM-matched)_');
+  });
+
+  it('omits the (LLM-matched) note on a deterministically-detected flow finding', () => {
+    const blast = withFindings([
+      {
+        kind: 'flow',
+        consumerRepo: '',
+        via: 'checkout pipeline',
+        flow: { label: 'checkout pipeline', step: 2, stepCount: 4, repoIds: ['a', 'b'] },
+        edgeType: 'STEP_IN_CROSS_PROCESS',
+        detectionTier: 'process',
+        confidence: 1,
+      },
+    ]);
+    const out = renderComment(blast, OPTS);
+    expect(out).not.toContain('_(LLM-matched)_');
+  });
+
   it('renders a generic degraded caveat on error WITHOUT echoing the raw error string', () => {
     const blast = withFindings([], [], 'bridge file missing for Secret Internal Group, re-analyze');
     const out = renderComment(blast, OPTS);
@@ -654,6 +687,185 @@ function contract(consumerRepo: string, via: string) {
     confidence: via.startsWith('messaging:') ? 0.8 : 0.7,
   };
 }
+
+describe('renderComment — HTTP symbol tier + call sites', () => {
+  /** Overlay a raw crossRepo envelope onto the full fixture and normalize. */
+  function withCross(cross: unknown): BlastResult {
+    const base = loadBlast('blast-result-full.json');
+    return normalizeBlastResult({ ...base, crossRepo: cross } as unknown as BlastResult);
+  }
+
+  it('routes sym→sym HTTP edges into the HTTP routes channel as located bullets', () => {
+    const out = renderComment(loadBlast('blast-result-http-cross-repo.json'), OPTS);
+    expect(out).toContain('## Cross-Repo Impact');
+    // 4 of the 5 findings are HTTP (graph/regex/declared/llm tiers); the 5th is a
+    // plain import. The HTTP channel is a located bullet list, not the inline form.
+    expect(out).toContain('**HTTP routes** (4):');
+    expect(out).toContain('- `GET /api/repos/*/prs/*/refresh` — called from');
+    expect(out).toContain('`POST /api/repos`');
+    // the plain import edge stays in the Imported symbols channel.
+    expect(out).toContain('**Imported symbols** (1):');
+  });
+
+  it('renders consumer call sites as escaped `file:line` lists with a (+N more) tail', () => {
+    const out = renderComment(loadBlast('blast-result-http-cross-repo.json'), OPTS);
+    // 2 call sites shown, consumerD1Count 4 → +2 more.
+    expect(out).toContain('called from `src/hub-client.ts:118`, `src/hub-client.ts:205` (+2 more)');
+  });
+
+  it('renders a plain import edge with consumer line and its call site', () => {
+    const out = renderComment(loadBlast('blast-result-http-cross-repo.json'), OPTS);
+    expect(out).toContain('`BlastResult` (used in `src/types/blast-result.ts:217`)');
+    expect(out).toContain('called from `src/render-comment.ts:12`');
+  });
+
+  it('renders the notYetKnowable caveat once, only when count > 0', () => {
+    const out = renderComment(loadBlast('blast-result-http-cross-repo.json'), OPTS);
+    expect(out).toContain(
+      '_2 changed symbols are new in this PR — cross-repo impact not yet knowable._',
+    );
+    expect((out.match(/not yet knowable/g) ?? []).length).toBe(1);
+  });
+
+  it('surfaces the caveat even with no findings and no error (new-exports-only PR)', () => {
+    const blast = withCross({
+      schemaVersion: '1',
+      findings: [],
+      groups: [],
+      truncated: false,
+      error: null,
+      notYetKnowable: [{ name: 'onlyNewExport' }],
+    });
+    const out = renderComment(blast, OPTS);
+    expect(out).toContain('## Cross-Repo Impact');
+    expect(out).toContain(
+      '_1 changed symbol is new in this PR — cross-repo impact not yet knowable._',
+    );
+  });
+
+  it('routes a via-prefixed symbol edge (no providerContract) into HTTP routes', () => {
+    const blast = withCross({
+      schemaVersion: '1',
+      findings: [
+        {
+          kind: 'symbol',
+          consumerRepo: 'org/consumer',
+          consumerSymbol: { name: 'del', filePath: 'src/c.ts' },
+          providerSymbol: null,
+          via: 'http:DELETE /api/x',
+          edgeType: 'FETCHES',
+          detectionTier: 'tier3_http_graph',
+          confidence: 0.9,
+        },
+      ],
+      groups: [],
+      truncated: false,
+      error: null,
+    });
+    const out = renderComment(blast, OPTS);
+    expect(out).toContain('**HTTP routes** (1):');
+    expect(out).toContain('- `DELETE /api/x`');
+  });
+
+  it('escapes pipe characters in call-site file paths', () => {
+    const blast = withCross({
+      schemaVersion: '1',
+      findings: [
+        {
+          kind: 'symbol',
+          consumerRepo: 'org/consumer',
+          consumerSymbol: { name: 'f', filePath: 'src/f.ts' },
+          providerSymbol: null,
+          via: 'http:GET /x',
+          edgeType: 'FETCHES',
+          detectionTier: 'tier3_http_graph',
+          confidence: 0.9,
+          providerContract: { kind: 'http', method: 'GET', path: '/x' },
+          callSites: [{ filePath: 'src/a|b.ts', startLine: 5 }],
+        },
+      ],
+      groups: [],
+      truncated: false,
+      error: null,
+    });
+    const out = renderComment(blast, OPTS);
+    expect(out).toContain('src/a\\|b.ts:5');
+  });
+
+  it('renders a pending-rebuild / pre-lines caveat through the existing degraded-note path', () => {
+    // The Hub sets these caveats on `error`; the Action renders the generic
+    // degraded note (privacy: never echoes the raw error) and must not mangle or
+    // throw on the em-dash-bearing pre-lines caveat.
+    for (const caveat of [
+      'group analysis in progress',
+      'bridge predates the HTTP symbol tier — re-analyze the group',
+    ]) {
+      const blast = withCross({
+        schemaVersion: '1',
+        findings: [],
+        groups: [],
+        truncated: false,
+        error: caveat,
+      });
+      expect(() => renderComment(blast, OPTS)).not.toThrow();
+      const out = renderComment(blast, OPTS);
+      expect(out).toContain('## Cross-Repo Impact');
+      expect(out).toContain(
+        '_Cross-repo analysis was incomplete, so some dependents may be missing._',
+      );
+      expect(out).toContain('_(cross-repo analysis unavailable)_');
+    }
+  });
+
+  it('never throws on a malformed flow finding (missing flow object)', () => {
+    const blast = withCross({
+      schemaVersion: '1',
+      findings: [
+        {
+          kind: 'flow',
+          consumerRepo: '',
+          via: 'broken pipeline',
+          edgeType: 'STEP_IN_CROSS_PROCESS',
+          detectionTier: 'process',
+          confidence: 1,
+        },
+      ],
+      groups: [],
+      truncated: false,
+      error: null,
+    });
+    expect(() => renderComment(blast, OPTS)).not.toThrow();
+    const out = renderComment(blast, OPTS);
+    expect(out).toContain('**Shared flows** (1):');
+    expect(out).toContain('`broken pipeline`');
+    expect(out).not.toContain('(step '); // no step clause when counters are absent
+  });
+
+  it('drops call-site detail (not the summary) as the payload degrades to capped', () => {
+    // A huge changed-symbol list forces the renderer down to `capped`. The HTTP
+    // route summary survives; the per-finding call-site lists are the detail that
+    // degrades, and the headline is never evicted.
+    const huge: SymbolRef[] = Array.from({ length: 20000 }, (_, i) => ({
+      id: `s${i}`,
+      name: `symbol_${i}_${'x'.repeat(40)}`,
+      type: 'Function',
+      filePath: `src/path/to/file_${i}.ts`,
+      startLine: 1,
+      endLine: 2,
+    }));
+    const base = loadBlast('blast-result-http-cross-repo.json');
+    const blast = normalizeBlastResult({
+      ...base,
+      changedSymbols: huge,
+    } as unknown as BlastResult);
+    const out = renderComment(blast, OPTS);
+    expect(out.length).toBeLessThanOrEqual(CHAR_BUDGET);
+    expect(out).toContain('## Cross-Repo Impact');
+    expect(out).toContain('**HTTP routes**');
+    expect(out).not.toContain('called from'); // call-site detail dropped at capped
+    expect(out).toContain('Blast level: `HIGH`'); // headline survives
+  });
+});
 
 describe('renderComment — escaping', () => {
   it('escapes pipe characters in module / symbol names', () => {
