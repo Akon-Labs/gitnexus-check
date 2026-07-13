@@ -34825,12 +34825,13 @@ const slm_format_1 = __nccwpck_require__(8449);
  *           6. renderComment  → markdown ≤ CHAR_BUDGET.
  *           6b. aiSummary     → if the Hub returned a digest, splice it on top
  *                               and collapse detail; else post (6) unchanged.
- *           7. postOrUpdate   → Octokit upsert by marker (MAIN comment). Fork
- *                               PRs carry a read-only token: they skip the write
- *                               and log the rendered comment instead, and any
- *                               403 degrades to a warning. Neither fails the run.
+ *           7. postOrUpdate   → Octokit upsert by marker (MAIN comment). Always
+ *                               ATTEMPTED (a fork may carry write access); a 403
+ *                               degrades to log-only (benign info on a fork, loud
+ *                               error on a same-repo misconfig) and logs the body.
+ *                               Never fails the run on a 403.
  *           6c. sinceLastCommit → if present, post a SEPARATE per-SHA comment;
- *                               best-effort, never fails the run (skipped on forks).
+ *                               best-effort, never fails the run (attempted on forks too).
  *           8. setOutput      → comment-id, blast-level, gate-decision.
  *           9. evaluateGate   → setFailed iff blast level meets/exceeds threshold.
  *
@@ -34921,47 +34922,51 @@ async function main() {
     //        call of its own.
     const hasDigest = typeof blast.aiSummary === 'string' && blast.aiSummary.trim().length > 0;
     const body = hasDigest ? (0, slm_format_1.composeWithDigest)(rawBody, blast.aiSummary ?? '') : rawBody;
-    // ── 7. Post (or update) the MAIN comment — unless this PR comes from a fork.
-    //        A fork PR's read-only GITHUB_TOKEN cannot write comments: the attempt
-    //        403s and would fail the run AFTER the Hub compute, silently blocking
-    //        the fork PR's gate. We degrade to log-only: emit the rendered review
-    //        into the step log so the analysis stays visible, skip the write, and
-    //        let the gate below run on the Hub data exactly as for a same-repo PR.
+    // ── 7. Post (or update) the MAIN comment. We ATTEMPT the write even on a fork:
+    //        a fork PR CAN carry write access (pull_request_target, or a configured
+    //        write PAT as github-token), so isFork is NOT proof we can't post. We
+    //        only degrade on an actual 403. A 403 must never fail the run — the Hub
+    //        compute and the gate below are the contract — so on isForbidden we log
+    //        the rendered review into the step log (keeping the analysis visible)
+    //        and continue. A FORK never fails the run on the main comment at ALL:
+    //        its write is inherently unreliable (usually a read-only token), so a
+    //        403 OR any transient error (500 / rate-limit) degrades to log-only —
+    //        failing a fork on a comment-post hiccup would re-block its gate, the
+    //        original bug. For a SAME-REPO PR a 403 (usually a real misconfig —
+    //        e.g. a Dependabot read-only token) degrades with a loud core.error
+    //        naming the pull-requests:write remedy; any non-403 still fails fast.
     let posted;
-    if (isFork) {
-        core.info('Fork PR detected — GITHUB_TOKEN is read-only, so the review comment cannot be posted. ' +
-            'Running in log-only mode; the rendered review follows and the gate still applies.');
-        core.info(body);
+    try {
+        const octokit = github.getOctokit(githubToken);
+        posted = await (0, post_comment_1.postOrUpdateComment)({
+            client: (0, post_comment_1.asIssueCommentsClient)(octokit),
+            owner,
+            repo,
+            prNumber,
+            marker: render_comment_1.COMMENT_MARKER,
+            body,
+        });
     }
-    else {
-        try {
-            const octokit = github.getOctokit(githubToken);
-            posted = await (0, post_comment_1.postOrUpdateComment)({
-                client: (0, post_comment_1.asIssueCommentsClient)(octokit),
-                owner,
-                repo,
-                prNumber,
-                marker: render_comment_1.COMMENT_MARKER,
-                body,
-            });
+    catch (err) {
+        if (isFork) {
+            // Forks: NEVER fail the run — degrade to log-only on any error kind.
+            core.info(isForbidden(err)
+                ? 'Fork PR detected — GITHUB_TOKEN is read-only, so the review comment cannot be posted. ' +
+                    'Running in log-only mode; the rendered review follows and the gate still applies.'
+                : `Fork PR — could not post the review comment (${(0, classify_error_1.classifyError)(err, 'github')}). ` +
+                    'Running in log-only mode; the rendered review follows and the gate still applies.');
+            core.info(body);
         }
-        catch (err) {
-            // Defense in depth: a 403 the fork precheck did not catch (a restricted
-            // same-repo token — e.g. a Dependabot PR, which is NOT a fork but still
-            // gets a read-only GITHUB_TOKEN) must never fail the run — the Hub compute
-            // and the gate below are the contract. But unlike a fork (an expected,
-            // benign case we announce with core.info), a same-repo 403 is usually a
-            // real misconfiguration the maintainer should fix, so surface it as an
-            // error ANNOTATION (visible, non-failing) with the actionable cause rather
-            // than a warning that is easy to miss. Any other error still fails fast.
-            if (isForbidden(err)) {
-                core.error(`Could not post the review comment: ${(0, classify_error_1.classifyError)(err, 'github')}. ` +
-                    "If this is a same-repo PR, grant the workflow 'pull-requests: write' " +
-                    'permission; the gate still ran on the Hub analysis below.');
-            }
-            else {
-                return fail(err, 'github', 'postOrUpdateComment');
-            }
+        else if (isForbidden(err)) {
+            core.error(`Could not post the review comment: ${(0, classify_error_1.classifyError)(err, 'github')}. ` +
+                "If this is a same-repo PR, grant the workflow 'pull-requests: write' " +
+                'permission; the gate still ran on the Hub analysis below.');
+            // Log the rendered review after a recovered 403 so a failed gate that
+            // says "See action log." actually points at the report (#5).
+            core.info(body);
+        }
+        else {
+            return fail(err, 'github', 'postOrUpdateComment');
         }
     }
     core.setOutput('blast-level', blast.blastLevel);
@@ -34976,9 +34981,10 @@ async function main() {
     //        per-commit history in the thread. This is additive: a failure here is
     //        swallowed via classifyError so it can NEVER fail the run, change the
     //        comment-id output, or affect the gate — the main review is the contract.
-    //        Skipped entirely on fork PRs (read-only token — same reason as §7).
+    //        Attempted even on fork PRs (a fork may carry write access); a read-only
+    //        403 is swallowed into a warning like any other failure — never pre-skipped.
     const delta = blast.sinceLastCommit;
-    if (delta != null && !isFork) {
+    if (delta != null) {
         try {
             const octokit = github.getOctokit(githubToken);
             const sincePosted = await (0, post_comment_1.postOrUpdateComment)({
@@ -35001,13 +35007,16 @@ async function main() {
     //        and BEFORE the gate, and is strictly best-effort: any failure is
     //        swallowed so it can NEVER fail the run or affect the gate (the gate
     //        reads blastLevel only). The two outputs are set ALWAYS (0 when off).
-    //        Skipped entirely when the input is off, on fork PRs (read-only token),
-    //        when the Hub sent no findings envelope, or when the Hub reported a
-    //        findings error — in every skip case the main comment stays byte-identical.
+    //        Attempted even on fork PRs (a fork may carry write access); a read-only
+    //        403 degrades — reconcile returns the findings as failed and the fallback
+    //        post is swallowed — rather than being pre-skipped. Skipped entirely when
+    //        the input is off, when the Hub sent no findings envelope, or when the Hub
+    //        reported a findings error — in every skip case the main comment stays
+    //        byte-identical.
     let inlinePosted = 0;
     let inlineSuppressed = 0;
     const findings = blast.findings;
-    if (findingsCfg.enabled && !isFork && findings != null && findings.error === null) {
+    if (findingsCfg.enabled && findings != null && findings.error === null) {
         try {
             const narrowed = narrowFindings(findings.items, findingsCfg);
             inlineSuppressed = findings.suppressedCount + narrowed.suppressed;
@@ -35232,13 +35241,17 @@ if (process.env.VITEST !== 'true') {
  *         and either PATCH the existing comment body or POST a new one.
  *         Token handling: the GITHUB_TOKEN flows through `@actions/github`
  *         via getOctokit and is never read, logged, or formatted here.
- *         A comment is only adopted (PATCHed) when its author is a bot, so a
- *         human commenter cannot plant the public marker to hijack or suppress
- *         our comment slot (see isAdoptableBotComment).
+ *         A comment is only adopted (PATCHed) when its author is US — an exact
+ *         match against the resolved authenticated actor (a PAT), else the
+ *         `[bot]`-suffix heuristic (GITHUB_TOKEN) — so a human commenter cannot
+ *         plant the public marker to hijack or suppress our comment slot
+ *         (see isAdoptableOwnComment / isOwnedComment).
  */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.postOrUpdateComment = postOrUpdateComment;
 exports.isBotAuthor = isBotAuthor;
+exports.resolveActorLogin = resolveActorLogin;
+exports.isOwnedComment = isOwnedComment;
 exports.asIssueCommentsClient = asIssueCommentsClient;
 /** Cap on pages we'll scan before giving up and creating a new comment. */
 const MAX_PAGES = 10;
@@ -35266,7 +35279,12 @@ const PER_PAGE = 100;
  */
 async function postOrUpdateComment(opts) {
     validateInputs(opts);
-    const existingId = await findExistingCommentId(opts);
+    // Resolve the authenticated actor once. A user-scoped PAT github-token returns
+    // its owner login (so we recognise our OWN prior comment by exact login and
+    // keep upsert idempotency); the ephemeral GITHUB_TOKEN 403s → null, and we fall
+    // back to the [bot]-suffix heuristic (it posts as github-actions[bot]).
+    const actorLogin = await resolveActorLogin(opts.client);
+    const existingId = await findExistingCommentId(opts, actorLogin);
     if (existingId !== null) {
         const res = await opts.client.rest.issues.updateComment({
             owner: opts.owner,
@@ -35287,12 +35305,13 @@ async function postOrUpdateComment(opts) {
 /**
  * @brief: Page through the PR's issue comments and return the id of the first
  *         comment we may safely adopt: one whose body contains `marker` AND
- *         whose author is a bot (see isAdoptableBotComment). A marker planted by
- *         a human is ignored so a commenter cannot hijack or suppress our
- *         comment slot. Returns null if none is found within MAX_PAGES — the
- *         caller then creates a fresh comment.
+ *         whose author is US (see isAdoptableOwnComment — exact-login when the
+ *         actor is known, else the bot heuristic). A marker planted by a human is
+ *         ignored so a commenter cannot hijack or suppress our comment slot.
+ *         Returns null if none is found within MAX_PAGES — the caller then
+ *         creates a fresh comment.
  */
-async function findExistingCommentId(opts) {
+async function findExistingCommentId(opts, actorLogin) {
     const iterator = opts.client.paginate.iterator('GET /repos/{owner}/{repo}/issues/{issue_number}/comments', {
         owner: opts.owner,
         repo: opts.repo,
@@ -35303,7 +35322,7 @@ async function findExistingCommentId(opts) {
     for await (const page of iterator) {
         pages += 1;
         for (const comment of page.data) {
-            if (isAdoptableBotComment(comment, opts.marker)) {
+            if (isAdoptableOwnComment(comment, opts.marker, actorLogin)) {
                 return comment.id;
             }
         }
@@ -35313,26 +35332,24 @@ async function findExistingCommentId(opts) {
     return null;
 }
 /**
- * @brief: True when `comment` is our own marker comment and therefore safe to
- *         adopt (PATCH). Requires BOTH the marker substring AND a bot author.
- *         A comment's `user.type` is set by GitHub and cannot be forged, so
- *         gating on `type === 'Bot'` stops a human commenter from planting the
- *         public marker to hijack (or suppress) our comment slot — a human's
- *         type is `'User'`, so their planted marker is ignored and a fresh
- *         comment is created. The login is matched by the `[bot]` suffix rather
- *         than a fixed `github-actions[bot]` so a run configured with a GitHub
- *         App installation token (author `<app>[bot]`) still updates its own
- *         comment instead of duplicating it every run.
+ * @brief: True when `comment` is our OWN marker comment and therefore safe to
+ *         adopt (PATCH). Requires BOTH the marker substring AND that the author is
+ *         us (see isOwnedComment): an exact login match when we resolved the
+ *         authenticated actor (a PAT github-token), else the `[bot]`-suffix
+ *         heuristic. A human commenter is never adopted — their login differs
+ *         from our actor and their unforgeable `user.type` is `'User'`, not
+ *         `'Bot'` — so a planted marker cannot hijack or suppress our slot.
  *
- * @params: (comment: ScannedComment) -> A comment from the paginated listing.
- * @params: (marker: string)          -> The identifying marker substring.
+ * @params: (comment: ScannedComment)     -> A comment from the paginated listing.
+ * @params: (marker: string)              -> The identifying marker substring.
+ * @params: (actorLogin: string | null)   -> The resolved authenticated actor, or null.
  *
- * @returns: boolean — true iff the comment is a bot-authored marker comment.
+ * @returns: boolean — true iff the comment is our own marker comment.
  */
-function isAdoptableBotComment(comment, marker) {
+function isAdoptableOwnComment(comment, marker, actorLogin) {
     if (typeof comment.body !== 'string' || !comment.body.includes(marker))
         return false;
-    return isBotAuthor(comment.user);
+    return isOwnedComment(comment.user, actorLogin);
 }
 /**
  * @brief: True when a comment's author is a bot we may safely adopt. A comment's
@@ -35343,15 +35360,60 @@ function isAdoptableBotComment(comment, marker) {
  *         fixed `github-actions[bot]` so a run configured with a GitHub App
  *         installation token (author `<app>[bot]`) still adopts its own comment.
  *
- *         Exported so the review-comment reconciler (post-review.ts) applies the
- *         IDENTICAL bot-identity semantics when scanning review comments for our
- *         finding markers — one predicate, no drift.
+ *         The shared fallback path of `isOwnedComment` (used by both the comment
+ *         poster and the review reconciler) when the authenticated actor is
+ *         unknown (GITHUB_TOKEN), so both surfaces derive identity from one place
+ *         with no drift.
  *
  * @params: (user) -> The GitHub-set author identity off a comment.
  * @returns: boolean — true iff the author is a `[bot]`-suffixed Bot.
  */
 function isBotAuthor(user) {
     return (user?.type === 'Bot' && typeof user.login === 'string' && user.login.endsWith('[bot]'));
+}
+/**
+ * @brief: Resolve the login of the token we are authenticated as, or null when it
+ *         cannot be determined. A user-scoped PAT resolves to its owner login;
+ *         the ephemeral GITHUB_TOKEN has no user identity and 403s, which we
+ *         treat as null (the caller then falls back to the bot-identity
+ *         heuristic). NEVER throws — a failed lookup is just an unknown actor.
+ *
+ *         Exported + shared so post-comment (upsert) and post-review (reconcile)
+ *         derive identity from one place, with no drift.
+ *
+ * @params: (client: AuthenticatedActorClient) -> Narrowed Octokit exposing users.getAuthenticated.
+ * @returns: Promise<string | null> — the actor login, or null when unknown.
+ */
+async function resolveActorLogin(client) {
+    try {
+        const res = await client.rest.users.getAuthenticated();
+        const login = res?.data?.login;
+        return typeof login === 'string' && login.length > 0 ? login : null;
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * @brief: True when a comment/review is OWNED by us and therefore safe to adopt.
+ *         When the authenticated actor is known (a PAT), require an EXACT login
+ *         match: this restores upsert idempotency for a user-PAT github-token
+ *         (whose author is a `User`, not a `[bot]`, so isBotAuthor alone would
+ *         miss it → duplicates) AND stops us adopting another bot's artifact.
+ *         When the actor is unknown (GITHUB_TOKEN 403 → null), fall back to the
+ *         `[bot]`-suffix heuristic (it posts as github-actions[bot]). Either way a
+ *         human-planted lookalike is rejected: their login != our actor and their
+ *         unforgeable type is `'User'`.
+ *
+ * @params: (user)       -> The GitHub-set author identity off a comment/review.
+ * @params: (actorLogin) -> The resolved authenticated actor login, or null.
+ * @returns: boolean — true iff the artifact is ours.
+ */
+function isOwnedComment(user, actorLogin) {
+    if (actorLogin !== null) {
+        return typeof user?.login === 'string' && user.login === actorLogin;
+    }
+    return isBotAuthor(user);
 }
 function validateInputs(opts) {
     if (!/^[\w.-]+$/.test(opts.owner)) {
@@ -35392,6 +35454,9 @@ function asIssueCommentsClient(octokit) {
                 createComment: (params) => octokit.rest.issues.createComment(params),
                 updateComment: (params) => octokit.rest.issues.updateComment(params),
             },
+            users: {
+                getAuthenticated: () => octokit.rest.users.getAuthenticated(),
+            },
         },
     };
 }
@@ -35423,9 +35488,11 @@ function asIssueCommentsClient(octokit) {
  *         flows through `@actions/github` and is never read, logged, or formatted
  *         here.
  *
- *         The bot-identity filter (only OUR bot's comments are adoptable) reuses
- *         `isBotAuthor` from post-comment.ts verbatim so a human cannot plant a
- *         finding marker to hijack or suppress a review comment.
+ *         The identity filter (only OUR OWN comments/reviews are adoptable) reuses
+ *         `isOwnedComment` from post-comment.ts verbatim — exact-login when the
+ *         authenticated actor is known (a PAT), else the `[bot]`-suffix heuristic
+ *         — so a human cannot plant a finding marker to hijack or suppress a
+ *         review comment, and a user-PAT run reconciles its own comments.
  */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.reconcileFindings = reconcileFindings;
@@ -35463,12 +35530,18 @@ async function reconcileFindings(opts) {
         result.failed.push(...postable);
         return result;
     }
+    // Resolve the authenticated actor once (never throws → null on GITHUB_TOKEN).
+    // A user-PAT github-token resolves to its owner login so we recognise our OWN
+    // prior finding comments (idempotency) and never delete another bot's pending
+    // review; GITHUB_TOKEN → null falls back to the [bot]-suffix heuristic.
+    const actorLogin = await (0, post_comment_1.resolveActorLogin)(opts.client);
     const ctx = {
         client: opts.client,
         owner: opts.owner,
         repo: opts.repo,
         prNumber: opts.prNumber,
         analyzedSha: opts.analyzedSha,
+        actorLogin,
     };
     try {
         // 1. Clear any leftover bot-owned PENDING review (best-effort).
@@ -35482,6 +35555,16 @@ async function reconcileFindings(opts) {
             const body = (0, render_findings_1.renderFindingComment)(item);
             const match = existing.get(item.fingerprint);
             if (!match) {
+                toCreate.push(item);
+                continue;
+            }
+            // A review comment's ANCHOR cannot move via PATCH: patching only rewrites
+            // the body, leaving a moved finding stuck on its old line. When the finding
+            // now anchors to a different path/line than the existing comment, re-create
+            // it at the correct line instead of patching. The old comment is left as-is
+            // (a stale comment on an outdated line is acceptable) and is NOT counted as
+            // updated — only the fresh create counts, so there is no double-report.
+            if (anchorMoved(item, match)) {
                 toCreate.push(item);
                 continue;
             }
@@ -35531,7 +35614,7 @@ async function deletePendingBotReviews(ctx) {
             per_page: PER_PAGE,
         });
         for (const review of res.data) {
-            if (review.state !== 'PENDING' || !(0, post_comment_1.isBotAuthor)(review.user))
+            if (review.state !== 'PENDING' || !(0, post_comment_1.isOwnedComment)(review.user, ctx.actorLogin))
                 continue;
             try {
                 await ctx.client.rest.pulls.deletePendingReview({
@@ -35551,11 +35634,12 @@ async function deletePendingBotReviews(ctx) {
     }
 }
 /**
- * @brief: Page the PR's review comments and map fingerprint → { id, body } for
- *         every BOT-authored comment carrying a finding marker. The bot-identity
- *         filter (isBotAuthor) means a human-planted marker is ignored, so a
- *         commenter cannot hijack or suppress a finding thread. May throw on a
- *         genuine list failure (caught by the caller, which then degrades to the
+ * @brief: Page the PR's review comments and map fingerprint → the existing
+ *         comment (id, body, anchor) for every OWNED comment carrying a finding
+ *         marker. The identity filter (isOwnedComment) means a human-planted
+ *         marker — or another bot's comment when we know our actor — is ignored,
+ *         so a commenter cannot hijack or suppress a finding thread. May throw on
+ *         a genuine list failure (caught by the caller, which then degrades to the
  *         fallback section); an empty PR simply yields an empty map.
  */
 async function scanExistingFindingComments(ctx) {
@@ -35572,11 +35656,20 @@ async function scanExistingFindingComments(ctx) {
         for (const comment of page.data) {
             if (typeof comment.body !== 'string')
                 continue;
-            if (!(0, post_comment_1.isBotAuthor)(comment.user))
+            if (!(0, post_comment_1.isOwnedComment)(comment.user, ctx.actorLogin))
                 continue;
             const fp = (0, render_findings_1.findingFingerprintFromBody)(comment.body);
-            if (fp && !map.has(fp))
-                map.set(fp, { id: comment.id, body: comment.body });
+            if (fp && !map.has(fp)) {
+                const entry = { id: comment.id, body: comment.body };
+                if (typeof comment.path === 'string')
+                    entry.path = comment.path;
+                // A review comment API row carries `line` (NEW side) and falls back to
+                // `original_line`; keep only a positive number.
+                const line = comment.line ?? comment.original_line;
+                if (typeof line === 'number' && line > 0)
+                    entry.line = line;
+                map.set(fp, entry);
+            }
         }
         if (pages >= MAX_PAGES)
             break;
@@ -35584,11 +35677,14 @@ async function scanExistingFindingComments(ctx) {
     return map;
 }
 /**
- * @brief: Post the new findings as ONE batched review. On a batch failure
- *         (typically 422 — a single bad anchor rejects the whole review, so
- *         nothing was posted) retry each finding as its own single-comment
- *         review: good anchors survive, the rest are pushed to result.failed for
- *         the fallback section. Never throws.
+ * @brief: Post the new findings as ONE batched review. The per-comment retry
+ *         ladder is entered ONLY on a CONFIRMED 422: createReview is all-or-
+ *         nothing on validation, so a 422 means NOTHING posted and retrying each
+ *         comment individually is safe (good anchors survive, the rest go to
+ *         result.failed for the fallback section). For any OTHER failure
+ *         (403 / 5xx / network) the batch may have PARTIALLY applied, so a
+ *         per-comment retry would duplicate — return every finding as failed
+ *         instead. Never throws.
  */
 async function createReviewBatch(ctx, toCreate, result) {
     try {
@@ -35603,8 +35699,14 @@ async function createReviewBatch(ctx, toCreate, result) {
         result.posted += toCreate.length;
         return;
     }
-    catch {
-        // Batch rejected — fall through to per-comment retries.
+    catch (err) {
+        // Only a validation 422 (all-or-nothing → nothing posted) is safe to retry
+        // per-comment. A non-422 error may have partially applied the batch, so
+        // degrade every finding to the fallback section rather than risk duplicates.
+        if (!isValidationError(err)) {
+            result.failed.push(...toCreate);
+            return;
+        }
     }
     for (const item of toCreate) {
         try {
@@ -35622,6 +35724,29 @@ async function createReviewBatch(ctx, toCreate, result) {
             result.failed.push(item);
         }
     }
+}
+/**
+ * @brief: True when a finding's current anchor (path + NEW-side start line)
+ *         differs from the existing comment's anchor, so a PATCH would leave it
+ *         stranded on the old line and it must be re-created. Returns false when
+ *         the existing comment's anchor is unknown (the list API omitted it) —
+ *         we cannot prove a move, so we keep the PATCH-in-place behavior.
+ */
+function anchorMoved(item, existing) {
+    if (typeof existing.path !== 'string' || typeof existing.line !== 'number')
+        return false;
+    const line = item.anchor.startLine;
+    return existing.path !== item.path || existing.line !== line;
+}
+/**
+ * @brief: True when a thrown value is an HTTP 422 (validation). Recognises both
+ *         the Octokit RequestError shape (`err.status`) and the axios shape
+ *         (`err.response.status`). Used to gate the per-comment retry ladder to
+ *         the ONE batch failure mode where nothing was posted.
+ */
+function isValidationError(err) {
+    const e = err;
+    return e?.status === 422 || e?.response?.status === 422;
 }
 /** Map a finding to a single-line NEW-side review comment. Anchor is guaranteed present. */
 function toReviewComment(item) {
@@ -35652,6 +35777,9 @@ function asReviewClient(octokit) {
                 createReview: (params) => octokit.rest.pulls.createReview(params),
                 updateReviewComment: (params) => octokit.rest.pulls.updateReviewComment(params),
                 deletePendingReview: (params) => octokit.rest.pulls.deletePendingReview(params),
+            },
+            users: {
+                getAuthenticated: () => octokit.rest.users.getAuthenticated(),
             },
         },
     };
@@ -36093,7 +36221,10 @@ function categorizeFinding(f, detail) {
             const display = flow && typeof flow.step === 'number' && typeof flow.stepCount === 'number'
                 ? `\`${escapeCell(label)}\` (step ${flow.step} of ${flow.stepCount})`
                 : `\`${escapeCell(label)}\``;
-            return { channel: 'Shared flows', display, style: 'bullet' };
+            // Append the provenance note so an llm_adjudicated flow reads '(LLM-matched)'
+            // like symbol/contract findings — an LLM-guessed coupling is never rendered
+            // as a deterministically proven one.
+            return { channel: 'Shared flows', display: `${display}${tierNote(f)}`, style: 'bullet' };
         }
         default:
             return null;
@@ -36686,8 +36817,8 @@ function renderFallbackSection(items, opts) {
     const lines = [];
     lines.push('## Findings not shown inline');
     lines.push('');
-    lines.push(`${items.length} GitNexus finding${items.length === 1 ? '' : 's'} could not be anchored ` +
-        `to a line in this PR's diff and ${items.length === 1 ? 'is' : 'are'} summarized here:`);
+    lines.push(`${items.length} GitNexus finding${items.length === 1 ? '' : 's'} ` +
+        `${items.length === 1 ? 'is' : 'are'} not shown inline and summarized here:`);
     lines.push('');
     for (const item of shown) {
         lines.push(`- ${renderFallbackItem(item)}`);
@@ -37216,11 +37347,26 @@ function normalizeFindings(v) {
  *         never be line-posted without a valid NEW-side line) so the fallback
  *         section carries it instead of it being silently dropped.
  */
+/**
+ * A Hub finding fingerprint: a sha256 hex digest (64 lowercase hex chars) with
+ * an optional `-N` disambiguation ordinal. Anything else (whitespace, `-->`,
+ * upper-case, wrong length) cannot survive the marker round-trip, so
+ * normalizeFindingItem drops it.
+ */
+const FINGERPRINT_RE = /^[0-9a-f]{64}(-\d+)?$/;
 function normalizeFindingItem(v) {
     if (!isObject(v))
         return null;
     const { fingerprint, checkId, origin, severity, confidence, title, rationale, path, anchored } = v;
     if (typeof fingerprint !== 'string' || fingerprint.length === 0)
+        return null;
+    // The fingerprint is embedded verbatim in the review-comment marker and parsed
+    // back out on the next run to reconcile in place. A real Hub fingerprint is a
+    // sha256 hex digest plus an optional `-N` ordinal, so constrain it to that
+    // shape: a malformed value with whitespace or `-->` would break the marker
+    // round-trip (duplicate comments) and cannot reconcile anyway. Drop it — the
+    // Action already tolerates malformed items by dropping them.
+    if (!FINGERPRINT_RE.test(fingerprint))
         return null;
     if (typeof checkId !== 'string')
         return null;
@@ -37264,15 +37410,21 @@ function normalizeFindingItem(v) {
         item.category = v.category;
     return item;
 }
-/** Validate a NEW-side anchor range; both lines must be positive and ordered. */
+/**
+ * Validate a NEW-side anchor range; both lines must be positive INTEGERS and
+ * ordered. GitHub's review-comment API requires an integer `line`, so a
+ * fractional value would pass a mere finite check yet 422 on post — reject it
+ * here (Number.isInteger also excludes NaN/±Infinity), which demotes the item to
+ * anchored:false so it renders in the fallback section rather than failing inline.
+ */
 function normalizeAnchor(v) {
     if (!isObject(v))
         return undefined;
     const { startLine, endLine } = v;
-    if (typeof startLine !== 'number' || !Number.isFinite(startLine) || startLine <= 0) {
+    if (typeof startLine !== 'number' || !Number.isInteger(startLine) || startLine <= 0) {
         return undefined;
     }
-    if (typeof endLine !== 'number' || !Number.isFinite(endLine) || endLine < startLine) {
+    if (typeof endLine !== 'number' || !Number.isInteger(endLine) || endLine < startLine) {
         return undefined;
     }
     return { startLine, endLine };

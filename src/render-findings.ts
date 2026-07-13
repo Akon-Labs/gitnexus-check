@@ -119,8 +119,8 @@ export function renderFallbackSection(items: FindingItem[], opts?: { maxItems?: 
   lines.push('## Findings not shown inline');
   lines.push('');
   lines.push(
-    `${items.length} GitNexus finding${items.length === 1 ? '' : 's'} could not be anchored ` +
-      `to a line in this PR's diff and ${items.length === 1 ? 'is' : 'are'} summarized here:`,
+    `${items.length} GitNexus finding${items.length === 1 ? '' : 's'} ` +
+      `${items.length === 1 ? 'is' : 'are'} not shown inline and summarized here:`,
   );
   lines.push('');
   for (const item of shown) {

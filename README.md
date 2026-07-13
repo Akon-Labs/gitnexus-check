@@ -111,7 +111,7 @@ jobs:
     steps:
       - uses: Akon-Labs/gitnexus-check@release
         with:
-          hub-url: https://gitnexus-enterprise-staging.up.railway.app
+          hub-url: https://app.akonlabs.com
           token: ${{ secrets.GITNEXUS_TOKEN }}
 ```
 
@@ -139,7 +139,7 @@ Open a PR and the comment shows up.
 | `blast-level` | The PR blast level: `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`. |
 | `gate-decision` | `pass`, `fail`, or `neutral`. `neutral` means advisory (no gate set). |
 | `inline-findings-posted` | Inline review comments posted or updated this run (0 when off). |
-| `inline-findings-suppressed` | Findings not surfaced inline: Hub noise-budget plus severity-floor / cap narrowing (0 when off). |
+| `inline-findings-suppressed` | Findings not surfaced inline: Hub noise-budget plus severity-floor narrowing (0 when off). Over-cap findings are demoted to the fallback section, not suppressed. |
 
 ### The merge gate (`fail-on-blast-level`)
 
@@ -151,7 +151,7 @@ check always has an explanation attached.
 ```yaml
 - uses: Akon-Labs/gitnexus-check@release
   with:
-    hub-url: https://gitnexus-enterprise-staging.up.railway.app
+    hub-url: https://app.akonlabs.com
     token: ${{ secrets.GITNEXUS_TOKEN }}
     fail-on-blast-level: CRITICAL   # block only on CRITICAL, omit for advisory
 ```
@@ -176,7 +176,7 @@ narrow what the Hub already produced.
 ```yaml
 - uses: Akon-Labs/gitnexus-check@release
   with:
-    hub-url: https://api.akonlabs.com
+    hub-url: https://app.akonlabs.com
     token: ${{ secrets.GITNEXUS_TOKEN }}
     inline-findings: true
 ```

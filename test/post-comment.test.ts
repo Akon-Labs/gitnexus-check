@@ -19,6 +19,9 @@ interface MockOpts {
   createId?: number;
   updateId?: number;
   createImpl?: () => Promise<never>;
+  // Simulate the authenticated actor. Default resolves an empty login (→ null →
+  // the [bot]-suffix heuristic), which is the GITHUB_TOKEN path.
+  getAuthenticated?: () => Promise<{ data: { login?: string } }>;
 }
 
 function makeClient(opts: MockOpts = {}): {
@@ -27,6 +30,7 @@ function makeClient(opts: MockOpts = {}): {
     iterator: ReturnType<typeof vi.fn>;
     createComment: ReturnType<typeof vi.fn>;
     updateComment: ReturnType<typeof vi.fn>;
+    getAuthenticated: ReturnType<typeof vi.fn>;
   };
 } {
   const pages = opts.pages ?? [[]];
@@ -39,6 +43,7 @@ function makeClient(opts: MockOpts = {}): {
     opts.createImpl ?? (async () => ({ data: { id: opts.createId ?? 999 } })),
   );
   const updateComment = vi.fn(async () => ({ data: { id: opts.updateId ?? 999 } }));
+  const getAuthenticated = vi.fn(opts.getAuthenticated ?? (async () => ({ data: {} })));
   return {
     client: {
       paginate: { iterator: iterator as unknown as IssueCommentsClient['paginate']['iterator'] },
@@ -47,9 +52,13 @@ function makeClient(opts: MockOpts = {}): {
           createComment: createComment as unknown as IssueCommentsClient['rest']['issues']['createComment'],
           updateComment: updateComment as unknown as IssueCommentsClient['rest']['issues']['updateComment'],
         },
+        users: {
+          getAuthenticated:
+            getAuthenticated as unknown as IssueCommentsClient['rest']['users']['getAuthenticated'],
+        },
       },
     },
-    spies: { iterator, createComment, updateComment },
+    spies: { iterator, createComment, updateComment, getAuthenticated },
   };
 }
 
@@ -249,6 +258,92 @@ describe('postOrUpdateComment — bot-identity filter', () => {
     });
     expect(res).toEqual({ commentId: 43, action: 'created' });
     expect(spies.createComment).toHaveBeenCalledOnce();
+  });
+});
+
+describe('postOrUpdateComment — authenticated actor (PAT) identity', () => {
+  // A user-scoped PAT github-token authors comments as the USER (type 'User'),
+  // not a [bot]. getAuthenticated resolves that login so upsert idempotency is
+  // preserved by an EXACT login match rather than the bot heuristic (which would
+  // miss it → duplicate every run).
+  const asUser = (login: string) => async () => ({ data: { login } });
+
+  it('adopts its OWN prior comment authored by a user-PAT (exact login match)', async () => {
+    const { client, spies } = makeClient({
+      pages: [[{ id: 314, body: `${MARKER}\nprior report`, user: { login: 'pat-owner', type: 'User' } }]],
+      updateId: 314,
+      getAuthenticated: asUser('pat-owner'),
+    });
+    const res = await postOrUpdateComment({
+      client,
+      owner: 'a',
+      repo: 'b',
+      prNumber: 7,
+      marker: MARKER,
+      body: BODY_OK,
+    });
+    expect(res).toEqual({ commentId: 314, action: 'updated' });
+    expect(spies.updateComment).toHaveBeenCalledOnce();
+    expect(spies.createComment).not.toHaveBeenCalled();
+  });
+
+  it('does NOT adopt another bot’s marker comment when the actor is a known PAT', async () => {
+    // github-actions[bot] would pass the bot heuristic, but the resolved actor is
+    // a different login — exact-match must exclude it so we do not hijack it.
+    const { client, spies } = makeClient({
+      pages: [[{ id: 20, body: `${MARKER}\nsomeone else`, user: BOT_USER }]],
+      createId: 55,
+      getAuthenticated: asUser('pat-owner'),
+    });
+    const res = await postOrUpdateComment({
+      client,
+      owner: 'a',
+      repo: 'b',
+      prNumber: 7,
+      marker: MARKER,
+      body: BODY_OK,
+    });
+    expect(res).toEqual({ commentId: 55, action: 'created' });
+    expect(spies.createComment).toHaveBeenCalledOnce();
+    expect(spies.updateComment).not.toHaveBeenCalled();
+  });
+
+  it('still rejects a human-planted marker when the actor is a known PAT', async () => {
+    const { client, spies } = makeClient({
+      pages: [[{ id: 9, body: `${MARKER}\nplanted`, user: { login: 'attacker', type: 'User' } }]],
+      createId: 77,
+      getAuthenticated: asUser('pat-owner'),
+    });
+    const res = await postOrUpdateComment({
+      client,
+      owner: 'a',
+      repo: 'b',
+      prNumber: 7,
+      marker: MARKER,
+      body: BODY_OK,
+    });
+    expect(res.action).toBe('created');
+    expect(spies.updateComment).not.toHaveBeenCalled();
+  });
+
+  it('falls back to the bot heuristic when getAuthenticated fails (GITHUB_TOKEN 403)', async () => {
+    const { client, spies } = makeClient({
+      pages: [[{ id: 88, body: `${MARKER}\nprior`, user: BOT_USER }]],
+      updateId: 88,
+      getAuthenticated: async () => {
+        throw new Error('403 Forbidden');
+      },
+    });
+    const res = await postOrUpdateComment({
+      client,
+      owner: 'a',
+      repo: 'b',
+      prNumber: 7,
+      marker: MARKER,
+      body: BODY_OK,
+    });
+    expect(res).toEqual({ commentId: 88, action: 'updated' });
+    expect(spies.updateComment).toHaveBeenCalledOnce();
   });
 });
 

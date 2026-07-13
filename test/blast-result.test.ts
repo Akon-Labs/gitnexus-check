@@ -421,8 +421,11 @@ describe('crossRepo HTTP symbol tier through normalize', () => {
 });
 
 describe('normalizeFindings — Wave-2 inline findings envelope', () => {
+  // A real Hub fingerprint is a sha256 hex digest (64 lowercase hex chars) with
+  // an optional `-N` ordinal — the shape normalizeFindingItem now enforces.
+  const VALID_FP = 'deadbeef'.repeat(8);
   const validItem = {
-    fingerprint: 'abc123',
+    fingerprint: VALID_FP,
     checkId: 'removed-export-with-consumers',
     origin: 'deterministic',
     severity: 'error',
@@ -506,7 +509,37 @@ describe('normalizeFindings — Wave-2 inline findings envelope', () => {
       ],
     });
     expect(out?.items).toHaveLength(1);
-    expect(out?.items[0].fingerprint).toBe('abc123');
+    expect(out?.items[0].fingerprint).toBe(VALID_FP);
+  });
+
+  it('drops an item whose fingerprint is not a clean sha256(-N) shape (#12)', () => {
+    const out = normalizeFindings({
+      schemaVersion: '1',
+      items: [
+        { ...validItem, fingerprint: `${VALID_FP} tail` }, // whitespace
+        { ...validItem, fingerprint: `${VALID_FP}--> x` }, // marker-breaking
+        { ...validItem, fingerprint: 'nothex'.repeat(11) }, // right length, non-hex
+        { ...validItem, fingerprint: VALID_FP.toUpperCase() }, // upper-case hex
+        { ...validItem, fingerprint: `${VALID_FP}-2` }, // valid ordinal — kept
+      ],
+    });
+    expect(out?.items).toHaveLength(1);
+    expect(out?.items[0].fingerprint).toBe(`${VALID_FP}-2`);
+  });
+
+  it('demotes an item with a fractional anchor line to anchored:false (#13)', () => {
+    const fractionalStart = normalizeFindings({
+      schemaVersion: '1',
+      items: [{ ...validItem, anchored: true, anchor: { startLine: 12.5, endLine: 14 } }],
+    });
+    expect(fractionalStart?.items[0].anchored).toBe(false);
+    expect(fractionalStart?.items[0].anchor).toBeUndefined();
+
+    const fractionalEnd = normalizeFindings({
+      schemaVersion: '1',
+      items: [{ ...validItem, anchored: true, anchor: { startLine: 12, endLine: 14.9 } }],
+    });
+    expect(fractionalEnd?.items[0].anchored).toBe(false);
   });
 
   it('demotes an anchored item with a missing / malformed anchor to anchored:false', () => {

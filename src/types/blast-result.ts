@@ -630,10 +630,25 @@ export function normalizeFindings(v: unknown): FindingsResult | undefined {
  *         never be line-posted without a valid NEW-side line) so the fallback
  *         section carries it instead of it being silently dropped.
  */
+/**
+ * A Hub finding fingerprint: a sha256 hex digest (64 lowercase hex chars) with
+ * an optional `-N` disambiguation ordinal. Anything else (whitespace, `-->`,
+ * upper-case, wrong length) cannot survive the marker round-trip, so
+ * normalizeFindingItem drops it.
+ */
+const FINGERPRINT_RE = /^[0-9a-f]{64}(-\d+)?$/;
+
 function normalizeFindingItem(v: unknown): FindingItem | null {
   if (!isObject(v)) return null;
   const { fingerprint, checkId, origin, severity, confidence, title, rationale, path, anchored } = v;
   if (typeof fingerprint !== 'string' || fingerprint.length === 0) return null;
+  // The fingerprint is embedded verbatim in the review-comment marker and parsed
+  // back out on the next run to reconcile in place. A real Hub fingerprint is a
+  // sha256 hex digest plus an optional `-N` ordinal, so constrain it to that
+  // shape: a malformed value with whitespace or `-->` would break the marker
+  // round-trip (duplicate comments) and cannot reconcile anyway. Drop it — the
+  // Action already tolerates malformed items by dropping them.
+  if (!FINGERPRINT_RE.test(fingerprint)) return null;
   if (typeof checkId !== 'string') return null;
   if (origin !== 'deterministic' && origin !== 'generated') return null;
   if (severity !== 'warning' && severity !== 'error') return null;
@@ -667,14 +682,20 @@ function normalizeFindingItem(v: unknown): FindingItem | null {
   return item;
 }
 
-/** Validate a NEW-side anchor range; both lines must be positive and ordered. */
+/**
+ * Validate a NEW-side anchor range; both lines must be positive INTEGERS and
+ * ordered. GitHub's review-comment API requires an integer `line`, so a
+ * fractional value would pass a mere finite check yet 422 on post — reject it
+ * here (Number.isInteger also excludes NaN/±Infinity), which demotes the item to
+ * anchored:false so it renders in the fallback section rather than failing inline.
+ */
 function normalizeAnchor(v: unknown): { startLine: number; endLine: number } | undefined {
   if (!isObject(v)) return undefined;
   const { startLine, endLine } = v;
-  if (typeof startLine !== 'number' || !Number.isFinite(startLine) || startLine <= 0) {
+  if (typeof startLine !== 'number' || !Number.isInteger(startLine) || startLine <= 0) {
     return undefined;
   }
-  if (typeof endLine !== 'number' || !Number.isFinite(endLine) || endLine < startLine) {
+  if (typeof endLine !== 'number' || !Number.isInteger(endLine) || endLine < startLine) {
     return undefined;
   }
   return { startLine, endLine };

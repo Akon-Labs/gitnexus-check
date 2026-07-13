@@ -118,6 +118,14 @@ function loadFullBlast(): unknown {
   );
 }
 
+// A read-only-token 403 on a comment write — the expected fork / restricted-token
+// failure the Action degrades from (log-only) rather than failing the run.
+const FORBIDDEN_403 = {
+  isAxiosError: true,
+  response: { status: 403, statusText: '', headers: {} },
+  config: { url: 'https://api.github.com/repos/a/b/issues/1/comments' },
+};
+
 beforeEach(() => {
   for (const k of Object.keys(outputs)) delete outputs[k];
   for (const k of Object.keys(inputs)) delete inputs[k];
@@ -518,27 +526,64 @@ describe('main — fork PR (log-only mode)', () => {
     };
   }
 
-  it('does NOT call the comment API and logs the rendered review instead', async () => {
+  it('ATTEMPTS the comment on a fork and, on a 403, logs the rendered review (log-only)', async () => {
     await setupHappy();
     makeFork();
+    // A fork MAY carry write access (pull_request_target / write PAT), so we
+    // attempt the write; the read-only 403 degrades to log-only.
+    postSpy.mockRejectedValue(FORBIDDEN_403);
     const { main } = await import('../src/main');
     await main();
 
-    // No GitHub write attempts at all on a fork.
-    expect(postSpy).not.toHaveBeenCalled();
+    expect(postSpy).toHaveBeenCalledOnce();
     // The rendered review is emitted into the step log so the analysis stays visible.
     const logged = infoSpy.mock.calls.map((c) => String(c[0])).join('\n');
     expect(logged).toContain('<!-- gitnexus-review-v1 -->');
     expect(logged.toLowerCase()).toContain('fork pr detected');
+    expect(setFailedSpy).not.toHaveBeenCalled();
     // Hub calls ran exactly as for a same-repo PR.
     expect(resolveSpy).toHaveBeenCalledOnce();
     expect(refreshSpy).toHaveBeenCalledOnce();
     expect(getBlastSpy).toHaveBeenCalledOnce();
   });
 
-  it('still evaluates the gate; blast-level set, no comment-id, no failure', async () => {
+  it('a fork with write access posts normally (no log-only fallback)', async () => {
     await setupHappy();
     makeFork();
+    // postSpy resolves (setupHappy) → the fork's configured write token succeeds.
+    const { main } = await import('../src/main');
+    await main();
+
+    expect(postSpy).toHaveBeenCalledOnce();
+    expect(outputs['comment-id']).toBe('5555');
+    const logged = infoSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged.toLowerCase()).not.toContain('fork pr detected');
+    expect(setFailedSpy).not.toHaveBeenCalled();
+  });
+
+  it('a fork NEVER fails the run on a NON-403 error (500) — degrades to log-only', async () => {
+    await setupHappy();
+    makeFork();
+    // A transient GitHub 500 on a fork's comment write must NOT block its gate
+    // (the original fork-fails bug); only a same-repo non-403 fails fast.
+    postSpy.mockRejectedValue({
+      isAxiosError: true,
+      response: { status: 500, statusText: '', headers: {} },
+      config: { url: 'https://api.github.com/repos/a/b/issues/1/comments' },
+    });
+    const { main } = await import('../src/main');
+    await main();
+
+    expect(setFailedSpy).not.toHaveBeenCalled();
+    const logged = infoSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged).toContain('<!-- gitnexus-review-v1 -->'); // report still in the log
+    expect(logged.toLowerCase()).toContain('log-only mode');
+  });
+
+  it('still evaluates the gate after a fork 403; blast-level set, no comment-id, no failure', async () => {
+    await setupHappy();
+    makeFork();
+    postSpy.mockRejectedValue(FORBIDDEN_403);
     const { main } = await import('../src/main');
     await main();
 
@@ -549,16 +594,16 @@ describe('main — fork PR (log-only mode)', () => {
     expect(setFailedSpy).not.toHaveBeenCalled();
   });
 
-  it('the gate STILL fails the run on a fork when the blast level trips the threshold', async () => {
+  it('the gate STILL fails the run on a fork 403 when the blast level trips the threshold', async () => {
     await setupHappy();
     makeFork();
+    postSpy.mockRejectedValue(FORBIDDEN_403);
     inputs['fail-on-blast-level'] = 'LOW';
     parseThresholdSpy.mockReturnValue('LOW');
     evaluateGateSpy.mockReturnValue('fail');
     const { main } = await import('../src/main');
     await main();
 
-    expect(postSpy).not.toHaveBeenCalled();
     expect(outputs['gate-decision']).toBe('fail');
     expect(setFailedSpy).toHaveBeenCalledOnce();
     const msg = setFailedSpy.mock.calls[0][0] as string;
@@ -571,17 +616,19 @@ describe('main — fork PR (log-only mode)', () => {
     await setupHappy();
     ghContext.payload.repository = { full_name: 'Akon-Labs/gitnexus-enterprise' };
     ghContext.payload.pull_request.head = { sha: undefined, repo: null };
+    postSpy.mockRejectedValue(FORBIDDEN_403);
     const { main } = await import('../src/main');
     await main();
 
-    expect(postSpy).not.toHaveBeenCalled();
     const logged = infoSpy.mock.calls.map((c) => String(c[0])).join('\n');
     expect(logged.toLowerCase()).toContain('fork pr detected');
+    expect(setFailedSpy).not.toHaveBeenCalled();
   });
 
-  it('skips the since-last-commit comment on a fork (no writes at all)', async () => {
+  it('ATTEMPTS the since-last-commit comment on a fork; a 403 degrades (no failure)', async () => {
     await setupHappy();
     makeFork();
+    postSpy.mockRejectedValue(FORBIDDEN_403);
     const blastRaw = loadFullBlast();
     const { isBlastResult, normalizeBlastResult } = await import('../src/types/blast-result');
     if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
@@ -591,7 +638,9 @@ describe('main — fork PR (log-only mode)', () => {
     const { main } = await import('../src/main');
     await main();
 
-    expect(postSpy).not.toHaveBeenCalled();
+    // Both the main comment and the delta are attempted; both 403 and degrade.
+    expect(postSpy).toHaveBeenCalledTimes(2);
+    expect(setFailedSpy).not.toHaveBeenCalled();
   });
 
   it('a same-repo PR (head.repo.full_name === base) is NOT treated as a fork', async () => {
@@ -828,7 +877,7 @@ describe('main — inline findings (Wave 2)', () => {
     expect(outputs['gate-decision']).toBe('neutral');
   });
 
-  it('fork + flag ON: no review posts, no comment, outputs 0', async () => {
+  it('fork + flag ON: still ATTEMPTS inline findings, degrades on 403, never fails', async () => {
     inputs['inline-findings'] = 'true';
     ghContext.payload.repository = { full_name: 'Akon-Labs/gitnexus-enterprise' };
     ghContext.payload.pull_request.head = {
@@ -839,10 +888,14 @@ describe('main — inline findings (Wave 2)', () => {
       schemaVersion: '1', analyzedSha: 'sha', items: [anchoredItem],
       suppressedCount: 0, truncated: false, error: null,
     });
+    // A fork's read-only token 403s the main comment (log-only); reconcile
+    // degrades every finding to the fallback, whose post also 403s (swallowed).
+    postSpy.mockRejectedValue(FORBIDDEN_403);
+    reconcileSpy.mockResolvedValue({ posted: 0, updated: 0, failed: [anchoredItem] });
     const { main } = await import('../src/main');
     await main();
-    expect(reconcileSpy).not.toHaveBeenCalled();
-    expect(postSpy).not.toHaveBeenCalled();
+    // Inline findings are ATTEMPTED even on a fork (a fork may carry write access).
+    expect(reconcileSpy).toHaveBeenCalledOnce();
     expect(outputs['inline-findings-posted']).toBe('0');
     expect(setFailedSpy).not.toHaveBeenCalled();
   });

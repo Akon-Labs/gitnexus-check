@@ -38,7 +38,7 @@ outputs:
   inline-findings-posted:
     description: 'Number of inline review comments posted or updated this run (0 when inline-findings is off).'
   inline-findings-suppressed:
-    description: 'Number of findings not surfaced inline: the Hub noise-budget suppressions plus any narrowed by the severity floor or the inline cap (0 when inline-findings is off).'
+    description: 'Number of findings not surfaced inline: the Hub noise-budget suppressions plus any narrowed by the severity floor (0 when inline-findings is off). Over-cap findings are demoted to the fallback section, not suppressed.'
 runs:
   using: 'node20'
   main: 'dist/index.js'

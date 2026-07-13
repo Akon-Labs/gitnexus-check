@@ -511,7 +511,10 @@ function categorizeFinding(
         flow && typeof flow.step === 'number' && typeof flow.stepCount === 'number'
           ? `\`${escapeCell(label)}\` (step ${flow.step} of ${flow.stepCount})`
           : `\`${escapeCell(label)}\``;
-      return { channel: 'Shared flows', display, style: 'bullet' };
+      // Append the provenance note so an llm_adjudicated flow reads '(LLM-matched)'
+      // like symbol/contract findings — an LLM-guessed coupling is never rendered
+      // as a deterministically proven one.
+      return { channel: 'Shared flows', display: `${display}${tierNote(f)}`, style: 'bullet' };
     }
     default:
       return null;

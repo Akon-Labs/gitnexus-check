@@ -128,6 +128,19 @@ describe('renderFallbackSection', () => {
     expect(section).toContain('🔴 **A problem** — `src/a.ts:5`');
   });
 
+  it('uses neutral "not shown inline" copy (not "could not be anchored")', () => {
+    // Over-cap and failed-to-post items WERE anchored, so the description must
+    // not claim they could not be anchored.
+    const one = renderFallbackSection([makeItem({ anchored: false })]);
+    expect(one).toContain('1 GitNexus finding is not shown inline');
+    expect(one).not.toContain('could not be anchored');
+    const many = renderFallbackSection([
+      makeItem({ fingerprint: 'a'.repeat(64), anchored: false }),
+      makeItem({ fingerprint: 'b'.repeat(64), anchored: false }),
+    ]);
+    expect(many).toContain('2 GitNexus findings are not shown inline');
+  });
+
   it('renders just the path when there is no anchor', () => {
     const section = renderFallbackSection([makeItem({ anchored: false, anchor: undefined, path: 'src/z.ts' })]);
     expect(section).toContain('`src/z.ts`');

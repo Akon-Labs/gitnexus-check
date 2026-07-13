@@ -552,6 +552,39 @@ describe('renderComment — crossRepo rendering', () => {
     expect(out).toContain('`checkout pipeline` (step 2 of 4)');
   });
 
+  it('appends the (LLM-matched) note on an llm_adjudicated flow finding', () => {
+    const blast = withFindings([
+      {
+        kind: 'flow',
+        consumerRepo: '',
+        via: 'checkout pipeline',
+        flow: { label: 'checkout pipeline', step: 2, stepCount: 4, repoIds: ['a', 'b'] },
+        edgeType: 'STEP_IN_CROSS_PROCESS',
+        detectionTier: 'llm_adjudicated',
+        confidence: 0.7,
+      },
+    ]);
+    const out = renderComment(blast, OPTS);
+    // A flow renders the LLM provenance note like symbol/contract findings do.
+    expect(out).toContain('`checkout pipeline` (step 2 of 4) _(LLM-matched)_');
+  });
+
+  it('omits the (LLM-matched) note on a deterministically-detected flow finding', () => {
+    const blast = withFindings([
+      {
+        kind: 'flow',
+        consumerRepo: '',
+        via: 'checkout pipeline',
+        flow: { label: 'checkout pipeline', step: 2, stepCount: 4, repoIds: ['a', 'b'] },
+        edgeType: 'STEP_IN_CROSS_PROCESS',
+        detectionTier: 'process',
+        confidence: 1,
+      },
+    ]);
+    const out = renderComment(blast, OPTS);
+    expect(out).not.toContain('_(LLM-matched)_');
+  });
+
   it('renders a generic degraded caveat on error WITHOUT echoing the raw error string', () => {
     const blast = withFindings([], [], 'bridge file missing for Secret Internal Group, re-analyze');
     const out = renderComment(blast, OPTS);

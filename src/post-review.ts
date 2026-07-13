@@ -17,21 +17,32 @@
  *         flows through `@actions/github` and is never read, logged, or formatted
  *         here.
  *
- *         The bot-identity filter (only OUR bot's comments are adoptable) reuses
- *         `isBotAuthor` from post-comment.ts verbatim so a human cannot plant a
- *         finding marker to hijack or suppress a review comment.
+ *         The identity filter (only OUR OWN comments/reviews are adoptable) reuses
+ *         `isOwnedComment` from post-comment.ts verbatim — exact-login when the
+ *         authenticated actor is known (a PAT), else the `[bot]`-suffix heuristic
+ *         — so a human cannot plant a finding marker to hijack or suppress a
+ *         review comment, and a user-PAT run reconciles its own comments.
  */
 
 import * as github from '@actions/github';
 import type { FindingItem } from './types/blast-result';
-import { isBotAuthor } from './post-comment';
+import { isOwnedComment, resolveActorLogin, type AuthenticatedActorClient } from './post-comment';
 import { renderFindingComment, findingFingerprintFromBody } from './render-findings';
 
-/** The subset of a PR review comment we read while scanning for our markers. */
+/**
+ * @brief: The subset of a PR review comment we read while scanning for our
+ *         markers. `path` + `line` (falling back to `original_line`) locate the
+ *         comment's anchor so a re-run can detect when a finding moved lines — a
+ *         review comment's anchor cannot be moved by a PATCH, so a moved finding
+ *         must be re-created rather than patched in place.
+ */
 type ReviewCommentRecord = {
   id: number;
   body?: string;
   user?: { login?: string; type?: string } | null;
+  path?: string;
+  line?: number | null;
+  original_line?: number | null;
 };
 
 /** The subset of a PR review we read while cleaning up leftover PENDING reviews. */
@@ -92,6 +103,7 @@ export interface ReviewClient {
         review_id: number;
       }) => Promise<{ data: unknown }>;
     };
+    users: AuthenticatedActorClient['rest']['users'];
   };
 }
 
@@ -109,6 +121,10 @@ interface ReconcileCtx {
   repo: string;
   prNumber: number;
   analyzedSha: string;
+  // Resolved authenticated actor (a PAT github-token) or null (GITHUB_TOKEN).
+  // Threaded into the marker scan + pending-review cleanup so we adopt/delete
+  // ONLY our own artifacts (exact-login when known, bot heuristic otherwise).
+  actorLogin: string | null;
 }
 
 /** Cap on pages we scan before giving up (mirrors post-comment.ts). */
@@ -152,12 +168,18 @@ export async function reconcileFindings(opts: {
     return result;
   }
 
+  // Resolve the authenticated actor once (never throws → null on GITHUB_TOKEN).
+  // A user-PAT github-token resolves to its owner login so we recognise our OWN
+  // prior finding comments (idempotency) and never delete another bot's pending
+  // review; GITHUB_TOKEN → null falls back to the [bot]-suffix heuristic.
+  const actorLogin = await resolveActorLogin(opts.client);
   const ctx: ReconcileCtx = {
     client: opts.client,
     owner: opts.owner,
     repo: opts.repo,
     prNumber: opts.prNumber,
     analyzedSha: opts.analyzedSha,
+    actorLogin,
   };
 
   try {
@@ -174,6 +196,16 @@ export async function reconcileFindings(opts: {
       const body = renderFindingComment(item);
       const match = existing.get(item.fingerprint);
       if (!match) {
+        toCreate.push(item);
+        continue;
+      }
+      // A review comment's ANCHOR cannot move via PATCH: patching only rewrites
+      // the body, leaving a moved finding stuck on its old line. When the finding
+      // now anchors to a different path/line than the existing comment, re-create
+      // it at the correct line instead of patching. The old comment is left as-is
+      // (a stale comment on an outdated line is acceptable) and is NOT counted as
+      // updated — only the fresh create counts, so there is no double-report.
+      if (anchorMoved(item, match)) {
         toCreate.push(item);
         continue;
       }
@@ -223,7 +255,7 @@ async function deletePendingBotReviews(ctx: ReconcileCtx): Promise<void> {
       per_page: PER_PAGE,
     });
     for (const review of res.data) {
-      if (review.state !== 'PENDING' || !isBotAuthor(review.user)) continue;
+      if (review.state !== 'PENDING' || !isOwnedComment(review.user, ctx.actorLogin)) continue;
       try {
         await ctx.client.rest.pulls.deletePendingReview({
           owner: ctx.owner,
@@ -240,18 +272,30 @@ async function deletePendingBotReviews(ctx: ReconcileCtx): Promise<void> {
   }
 }
 
+/** An existing finding comment: its id + rendered body and its current anchor. */
+interface ExistingFindingComment {
+  id: number;
+  body: string;
+  // The comment's anchor, when the list API reported it: `line` falls back to
+  // `original_line`. Absent when unknown, in which case a re-run keeps the
+  // existing PATCH-in-place behavior rather than assuming the anchor moved.
+  path?: string;
+  line?: number;
+}
+
 /**
- * @brief: Page the PR's review comments and map fingerprint → { id, body } for
- *         every BOT-authored comment carrying a finding marker. The bot-identity
- *         filter (isBotAuthor) means a human-planted marker is ignored, so a
- *         commenter cannot hijack or suppress a finding thread. May throw on a
- *         genuine list failure (caught by the caller, which then degrades to the
+ * @brief: Page the PR's review comments and map fingerprint → the existing
+ *         comment (id, body, anchor) for every OWNED comment carrying a finding
+ *         marker. The identity filter (isOwnedComment) means a human-planted
+ *         marker — or another bot's comment when we know our actor — is ignored,
+ *         so a commenter cannot hijack or suppress a finding thread. May throw on
+ *         a genuine list failure (caught by the caller, which then degrades to the
  *         fallback section); an empty PR simply yields an empty map.
  */
 async function scanExistingFindingComments(
   ctx: ReconcileCtx,
-): Promise<Map<string, { id: number; body: string }>> {
-  const map = new Map<string, { id: number; body: string }>();
+): Promise<Map<string, ExistingFindingComment>> {
+  const map = new Map<string, ExistingFindingComment>();
   const iterator = ctx.client.paginate.iterator(
     'GET /repos/{owner}/{repo}/pulls/{pull_number}/comments',
     {
@@ -266,9 +310,17 @@ async function scanExistingFindingComments(
     pages += 1;
     for (const comment of page.data) {
       if (typeof comment.body !== 'string') continue;
-      if (!isBotAuthor(comment.user)) continue;
+      if (!isOwnedComment(comment.user, ctx.actorLogin)) continue;
       const fp = findingFingerprintFromBody(comment.body);
-      if (fp && !map.has(fp)) map.set(fp, { id: comment.id, body: comment.body });
+      if (fp && !map.has(fp)) {
+        const entry: ExistingFindingComment = { id: comment.id, body: comment.body };
+        if (typeof comment.path === 'string') entry.path = comment.path;
+        // A review comment API row carries `line` (NEW side) and falls back to
+        // `original_line`; keep only a positive number.
+        const line = comment.line ?? comment.original_line;
+        if (typeof line === 'number' && line > 0) entry.line = line;
+        map.set(fp, entry);
+      }
     }
     if (pages >= MAX_PAGES) break;
   }
@@ -276,11 +328,14 @@ async function scanExistingFindingComments(
 }
 
 /**
- * @brief: Post the new findings as ONE batched review. On a batch failure
- *         (typically 422 — a single bad anchor rejects the whole review, so
- *         nothing was posted) retry each finding as its own single-comment
- *         review: good anchors survive, the rest are pushed to result.failed for
- *         the fallback section. Never throws.
+ * @brief: Post the new findings as ONE batched review. The per-comment retry
+ *         ladder is entered ONLY on a CONFIRMED 422: createReview is all-or-
+ *         nothing on validation, so a 422 means NOTHING posted and retrying each
+ *         comment individually is safe (good anchors survive, the rest go to
+ *         result.failed for the fallback section). For any OTHER failure
+ *         (403 / 5xx / network) the batch may have PARTIALLY applied, so a
+ *         per-comment retry would duplicate — return every finding as failed
+ *         instead. Never throws.
  */
 async function createReviewBatch(
   ctx: ReconcileCtx,
@@ -298,8 +353,14 @@ async function createReviewBatch(
     });
     result.posted += toCreate.length;
     return;
-  } catch {
-    // Batch rejected — fall through to per-comment retries.
+  } catch (err) {
+    // Only a validation 422 (all-or-nothing → nothing posted) is safe to retry
+    // per-comment. A non-422 error may have partially applied the batch, so
+    // degrade every finding to the fallback section rather than risk duplicates.
+    if (!isValidationError(err)) {
+      result.failed.push(...toCreate);
+      return;
+    }
   }
   for (const item of toCreate) {
     try {
@@ -316,6 +377,30 @@ async function createReviewBatch(
       result.failed.push(item);
     }
   }
+}
+
+/**
+ * @brief: True when a finding's current anchor (path + NEW-side start line)
+ *         differs from the existing comment's anchor, so a PATCH would leave it
+ *         stranded on the old line and it must be re-created. Returns false when
+ *         the existing comment's anchor is unknown (the list API omitted it) —
+ *         we cannot prove a move, so we keep the PATCH-in-place behavior.
+ */
+function anchorMoved(item: FindingItem, existing: { path?: string; line?: number }): boolean {
+  if (typeof existing.path !== 'string' || typeof existing.line !== 'number') return false;
+  const line = (item.anchor as { startLine: number }).startLine;
+  return existing.path !== item.path || existing.line !== line;
+}
+
+/**
+ * @brief: True when a thrown value is an HTTP 422 (validation). Recognises both
+ *         the Octokit RequestError shape (`err.status`) and the axios shape
+ *         (`err.response.status`). Used to gate the per-comment retry ladder to
+ *         the ONE batch failure mode where nothing was posted.
+ */
+function isValidationError(err: unknown): boolean {
+  const e = err as { status?: unknown; response?: { status?: unknown } };
+  return e?.status === 422 || e?.response?.status === 422;
 }
 
 /** Map a finding to a single-line NEW-side review comment. Anchor is guaranteed present. */
@@ -348,6 +433,9 @@ export function asReviewClient(octokit: ReturnType<typeof github.getOctokit>): R
         createReview: (params) => octokit.rest.pulls.createReview(params),
         updateReviewComment: (params) => octokit.rest.pulls.updateReviewComment(params),
         deletePendingReview: (params) => octokit.rest.pulls.deletePendingReview(params),
+      },
+      users: {
+        getAuthenticated: () => octokit.rest.users.getAuthenticated(),
       },
     },
   };

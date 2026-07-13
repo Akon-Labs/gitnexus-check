@@ -34,12 +34,13 @@ import type { FindingItem } from './types/blast-result';
  *           6. renderComment  → markdown ≤ CHAR_BUDGET.
  *           6b. aiSummary     → if the Hub returned a digest, splice it on top
  *                               and collapse detail; else post (6) unchanged.
- *           7. postOrUpdate   → Octokit upsert by marker (MAIN comment). Fork
- *                               PRs carry a read-only token: they skip the write
- *                               and log the rendered comment instead, and any
- *                               403 degrades to a warning. Neither fails the run.
+ *           7. postOrUpdate   → Octokit upsert by marker (MAIN comment). Always
+ *                               ATTEMPTED (a fork may carry write access); a 403
+ *                               degrades to log-only (benign info on a fork, loud
+ *                               error on a same-repo misconfig) and logs the body.
+ *                               Never fails the run on a 403.
  *           6c. sinceLastCommit → if present, post a SEPARATE per-SHA comment;
- *                               best-effort, never fails the run (skipped on forks).
+ *                               best-effort, never fails the run (attempted on forks too).
  *           8. setOutput      → comment-id, blast-level, gate-decision.
  *           9. evaluateGate   → setFailed iff blast level meets/exceeds threshold.
  *
@@ -137,48 +138,52 @@ export async function main(): Promise<void> {
   const hasDigest = typeof blast.aiSummary === 'string' && blast.aiSummary.trim().length > 0;
   const body = hasDigest ? composeWithDigest(rawBody, blast.aiSummary ?? '') : rawBody;
 
-  // ── 7. Post (or update) the MAIN comment — unless this PR comes from a fork.
-  //        A fork PR's read-only GITHUB_TOKEN cannot write comments: the attempt
-  //        403s and would fail the run AFTER the Hub compute, silently blocking
-  //        the fork PR's gate. We degrade to log-only: emit the rendered review
-  //        into the step log so the analysis stays visible, skip the write, and
-  //        let the gate below run on the Hub data exactly as for a same-repo PR.
+  // ── 7. Post (or update) the MAIN comment. We ATTEMPT the write even on a fork:
+  //        a fork PR CAN carry write access (pull_request_target, or a configured
+  //        write PAT as github-token), so isFork is NOT proof we can't post. We
+  //        only degrade on an actual 403. A 403 must never fail the run — the Hub
+  //        compute and the gate below are the contract — so on isForbidden we log
+  //        the rendered review into the step log (keeping the analysis visible)
+  //        and continue. A FORK never fails the run on the main comment at ALL:
+  //        its write is inherently unreliable (usually a read-only token), so a
+  //        403 OR any transient error (500 / rate-limit) degrades to log-only —
+  //        failing a fork on a comment-post hiccup would re-block its gate, the
+  //        original bug. For a SAME-REPO PR a 403 (usually a real misconfig —
+  //        e.g. a Dependabot read-only token) degrades with a loud core.error
+  //        naming the pull-requests:write remedy; any non-403 still fails fast.
   let posted;
-  if (isFork) {
-    core.info(
-      'Fork PR detected — GITHUB_TOKEN is read-only, so the review comment cannot be posted. ' +
-        'Running in log-only mode; the rendered review follows and the gate still applies.',
-    );
-    core.info(body);
-  } else {
-    try {
-      const octokit = github.getOctokit(githubToken);
-      posted = await postOrUpdateComment({
-        client: asIssueCommentsClient(octokit),
-        owner,
-        repo,
-        prNumber,
-        marker: COMMENT_MARKER,
-        body,
-      });
-    } catch (err) {
-      // Defense in depth: a 403 the fork precheck did not catch (a restricted
-      // same-repo token — e.g. a Dependabot PR, which is NOT a fork but still
-      // gets a read-only GITHUB_TOKEN) must never fail the run — the Hub compute
-      // and the gate below are the contract. But unlike a fork (an expected,
-      // benign case we announce with core.info), a same-repo 403 is usually a
-      // real misconfiguration the maintainer should fix, so surface it as an
-      // error ANNOTATION (visible, non-failing) with the actionable cause rather
-      // than a warning that is easy to miss. Any other error still fails fast.
-      if (isForbidden(err)) {
-        core.error(
-          `Could not post the review comment: ${classifyError(err, 'github')}. ` +
-            "If this is a same-repo PR, grant the workflow 'pull-requests: write' " +
-            'permission; the gate still ran on the Hub analysis below.',
-        );
-      } else {
-        return fail(err, 'github', 'postOrUpdateComment');
-      }
+  try {
+    const octokit = github.getOctokit(githubToken);
+    posted = await postOrUpdateComment({
+      client: asIssueCommentsClient(octokit),
+      owner,
+      repo,
+      prNumber,
+      marker: COMMENT_MARKER,
+      body,
+    });
+  } catch (err) {
+    if (isFork) {
+      // Forks: NEVER fail the run — degrade to log-only on any error kind.
+      core.info(
+        isForbidden(err)
+          ? 'Fork PR detected — GITHUB_TOKEN is read-only, so the review comment cannot be posted. ' +
+              'Running in log-only mode; the rendered review follows and the gate still applies.'
+          : `Fork PR — could not post the review comment (${classifyError(err, 'github')}). ` +
+              'Running in log-only mode; the rendered review follows and the gate still applies.',
+      );
+      core.info(body);
+    } else if (isForbidden(err)) {
+      core.error(
+        `Could not post the review comment: ${classifyError(err, 'github')}. ` +
+          "If this is a same-repo PR, grant the workflow 'pull-requests: write' " +
+          'permission; the gate still ran on the Hub analysis below.',
+      );
+      // Log the rendered review after a recovered 403 so a failed gate that
+      // says "See action log." actually points at the report (#5).
+      core.info(body);
+    } else {
+      return fail(err, 'github', 'postOrUpdateComment');
     }
   }
 
@@ -195,9 +200,10 @@ export async function main(): Promise<void> {
   //        per-commit history in the thread. This is additive: a failure here is
   //        swallowed via classifyError so it can NEVER fail the run, change the
   //        comment-id output, or affect the gate — the main review is the contract.
-  //        Skipped entirely on fork PRs (read-only token — same reason as §7).
+  //        Attempted even on fork PRs (a fork may carry write access); a read-only
+  //        403 is swallowed into a warning like any other failure — never pre-skipped.
   const delta = blast.sinceLastCommit;
-  if (delta != null && !isFork) {
+  if (delta != null) {
     try {
       const octokit = github.getOctokit(githubToken);
       const sincePosted = await postOrUpdateComment({
@@ -220,13 +226,16 @@ export async function main(): Promise<void> {
   //        and BEFORE the gate, and is strictly best-effort: any failure is
   //        swallowed so it can NEVER fail the run or affect the gate (the gate
   //        reads blastLevel only). The two outputs are set ALWAYS (0 when off).
-  //        Skipped entirely when the input is off, on fork PRs (read-only token),
-  //        when the Hub sent no findings envelope, or when the Hub reported a
-  //        findings error — in every skip case the main comment stays byte-identical.
+  //        Attempted even on fork PRs (a fork may carry write access); a read-only
+  //        403 degrades — reconcile returns the findings as failed and the fallback
+  //        post is swallowed — rather than being pre-skipped. Skipped entirely when
+  //        the input is off, when the Hub sent no findings envelope, or when the Hub
+  //        reported a findings error — in every skip case the main comment stays
+  //        byte-identical.
   let inlinePosted = 0;
   let inlineSuppressed = 0;
   const findings = blast.findings;
-  if (findingsCfg.enabled && !isFork && findings != null && findings.error === null) {
+  if (findingsCfg.enabled && findings != null && findings.error === null) {
     try {
       const narrowed = narrowFindings(findings.items, findingsCfg);
       inlineSuppressed = findings.suppressedCount + narrowed.suppressed;
