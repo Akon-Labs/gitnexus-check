@@ -410,7 +410,10 @@ describe('main — GitHub error path', () => {
     expect(msg).not.toContain('See PR comment.');
   });
 
-  it('still fails the run on a non-403 GitHub error (e.g. 500)', async () => {
+  it('a non-403 comment error (500) degrades to log-only, NEVER fails the run', async () => {
+    // Posting the comment is presentation; the Hub compute already succeeded and
+    // the gate decides from blastLevel alone. A transient GitHub 500 must not
+    // fail a below-threshold run (doctrine: comment errors never setFailed).
     resolveSpy.mockResolvedValue('repo-uuid');
     refreshSpy.mockResolvedValue(undefined);
     const blastRaw = loadFullBlast();
@@ -426,9 +429,14 @@ describe('main — GitHub error path', () => {
 
     const { main } = await import('../src/main');
     await main();
-    expect(setFailedSpy).toHaveBeenCalledOnce();
-    const msg = setFailedSpy.mock.calls[0][0] as string;
-    expect(msg).toContain('postOrUpdateComment');
+    expect(setFailedSpy).not.toHaveBeenCalled();
+    // Surfaced as a loud (non-failing) error annotation, and the review is logged.
+    const errors = errorSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(errors).toContain('Could not post the review comment');
+    const logged = infoSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged).toContain('<!-- gitnexus-review-v1 -->');
+    // The gate still ran on the Hub data.
+    expect(outputs['blast-level']).toBe('LOW');
   });
 });
 
@@ -767,6 +775,38 @@ describe('main — inline findings (Wave 2)', () => {
     expect(postSpy).toHaveBeenCalledOnce();
     expect(outputs['inline-findings-posted']).toBe('0');
     expect(outputs['inline-findings-suppressed']).toBe('0');
+  });
+
+  it('flag ON but findings are for a DIFFERENT head sha: skips inline posting (freshness guard)', async () => {
+    inputs['inline-findings'] = 'true';
+    // The run's head is 'b2b2b2b2'; the Hub findings envelope was computed for
+    // the prior push 'a1a1a1a1' (async stage hasn't caught up). Posting A's
+    // findings onto B would anchor to the wrong commit → skip.
+    ghContext.payload.pull_request.head = { sha: 'b2b2b2b2' };
+    await setupBlast({
+      schemaVersion: '1', analyzedSha: 'a1a1a1a1', items: [anchoredItem],
+      suppressedCount: 0, truncated: false, error: null,
+    });
+    const { main } = await import('../src/main');
+    await main();
+    expect(reconcileSpy).not.toHaveBeenCalled();
+    expect(outputs['inline-findings-posted']).toBe('0');
+    const logged = infoSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged).toContain('not the current head');
+  });
+
+  it('flag ON and findings MATCH the head sha: posts normally', async () => {
+    inputs['inline-findings'] = 'true';
+    ghContext.payload.pull_request.head = { sha: 'abc1234' };
+    reconcileSpy.mockResolvedValue({ posted: 1, updated: 0, failed: [] });
+    await setupBlast({
+      schemaVersion: '1', analyzedSha: 'abc1234', items: [anchoredItem],
+      suppressedCount: 0, truncated: false, error: null,
+    });
+    const { main } = await import('../src/main');
+    await main();
+    expect(reconcileSpy).toHaveBeenCalledOnce();
+    expect((reconcileSpy.mock.calls[0][0] as { analyzedSha: string }).analyzedSha).toBe('abc1234');
   });
 
   it('flag ON: reconciles anchored findings with analyzedSha; posted + Hub-suppressed outputs', async () => {

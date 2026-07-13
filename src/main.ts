@@ -141,16 +141,14 @@ export async function main(): Promise<void> {
   // ── 7. Post (or update) the MAIN comment. We ATTEMPT the write even on a fork:
   //        a fork PR CAN carry write access (pull_request_target, or a configured
   //        write PAT as github-token), so isFork is NOT proof we can't post. We
-  //        only degrade on an actual 403. A 403 must never fail the run — the Hub
-  //        compute and the gate below are the contract — so on isForbidden we log
-  //        the rendered review into the step log (keeping the analysis visible)
-  //        and continue. A FORK never fails the run on the main comment at ALL:
-  //        its write is inherently unreliable (usually a read-only token), so a
-  //        403 OR any transient error (500 / rate-limit) degrades to log-only —
-  //        failing a fork on a comment-post hiccup would re-block its gate, the
-  //        original bug. For a SAME-REPO PR a 403 (usually a real misconfig —
-  //        e.g. a Dependabot read-only token) degrades with a loud core.error
-  //        naming the pull-requests:write remedy; any non-403 still fails fast.
+  //        ATTEMPT the write and, on ANY failure, degrade to log-only — posting
+  //        the comment is presentation, and NO comment-post error may fail the
+  //        run (doctrine: the gate is the contract, decided from blastLevel
+  //        alone below). A fork or a 403 is an expected read-only case (benign
+  //        info / actionable permission remedy); any other error (500, rate
+  //        limit, network) is a loud but non-failing error annotation. In every
+  //        case the rendered review is logged so a failed gate's "See action
+  //        log." points at the report.
   let posted;
   try {
     const octokit = github.getOctokit(githubToken);
@@ -163,8 +161,15 @@ export async function main(): Promise<void> {
       body,
     });
   } catch (err) {
+    // Posting the review comment is PRESENTATION — the Hub compute already
+    // succeeded and the gate below decides pass/fail from blastLevel alone. So
+    // NO comment-post error ever fails the run (doctrine: comment/findings/fork
+    // errors never setFailed; the gate is the contract). We degrade to log-only
+    // and continue, tuning only the message: a fork or a 403 is an expected
+    // read-only case (benign info / actionable permission remedy); any other
+    // error (500, rate-limit, network) is surfaced as a loud error annotation
+    // but is still non-failing.
     if (isFork) {
-      // Forks: NEVER fail the run — degrade to log-only on any error kind.
       core.info(
         isForbidden(err)
           ? 'Fork PR detected — GITHUB_TOKEN is read-only, so the review comment cannot be posted. ' +
@@ -172,19 +177,21 @@ export async function main(): Promise<void> {
           : `Fork PR — could not post the review comment (${classifyError(err, 'github')}). ` +
               'Running in log-only mode; the rendered review follows and the gate still applies.',
       );
-      core.info(body);
     } else if (isForbidden(err)) {
       core.error(
         `Could not post the review comment: ${classifyError(err, 'github')}. ` +
           "If this is a same-repo PR, grant the workflow 'pull-requests: write' " +
           'permission; the gate still ran on the Hub analysis below.',
       );
-      // Log the rendered review after a recovered 403 so a failed gate that
-      // says "See action log." actually points at the report (#5).
-      core.info(body);
     } else {
-      return fail(err, 'github', 'postOrUpdateComment');
+      core.error(
+        `Could not post the review comment: ${classifyError(err, 'github')}. ` +
+          'The gate still ran on the Hub analysis below; the rendered review follows in the log.',
+      );
     }
+    // Log the rendered review after any recovered error so a failed gate that
+    // says "See action log." actually points at the report (#5).
+    core.info(body);
   }
 
   core.setOutput('blast-level', blast.blastLevel);
@@ -235,7 +242,24 @@ export async function main(): Promise<void> {
   let inlinePosted = 0;
   let inlineSuppressed = 0;
   const findings = blast.findings;
-  if (findingsCfg.enabled && findings != null && findings.error === null) {
+  // Freshness guard: findings compute ASYNC on the Hub, so a quick re-push can
+  // make getBlast return the PRIOR commit's findings (findings.analyzedSha = A)
+  // while this run's head is B. Posting A's findings — anchored to A's lines and
+  // pinned to commit A — onto B would be wrong, so skip inline posting when the
+  // envelope was computed for a different head; the next push's compute catches
+  // up. Only compare when BOTH shas are known (older Hubs omit analyzedSha).
+  const findingsFresh =
+    findings == null ||
+    findings.analyzedSha == null ||
+    headSha == null ||
+    findings.analyzedSha === headSha;
+  if (!findingsFresh) {
+    core.info(
+      `Inline findings skipped: the Hub findings envelope is for ${findings!.analyzedSha}, ` +
+        `not the current head ${headSha}. They will post once the Hub finishes analyzing this commit.`,
+    );
+  }
+  if (findingsCfg.enabled && findingsFresh && findings != null && findings.error === null) {
     try {
       const narrowed = narrowFindings(findings.items, findingsCfg);
       inlineSuppressed = findings.suppressedCount + narrowed.suppressed;
