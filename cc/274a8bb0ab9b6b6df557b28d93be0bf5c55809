@@ -1,0 +1,26 @@
+test/main.test.ts
+  s_95bf8578770bcd::t_87cb3fa271b844 413-416,432-439
+  s_95bf8578770bcd::t_27104f9fd1b9eb 780-811
+dist/index.js
+  s_95bf8578770bcd::t_5d4730a7a64530 34928-34935,34949-34956,34970-34971,34973-34975,35024-35038
+src/main.ts
+  s_95bf8578770bcd::t_8611209de439c0 144-151
+  s_95bf8578770bcd::t_a30b93121d3971 164-171,187-190,192-194
+  s_95bf8578770bcd::t_923534722efdd8 245-262
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "cc274a8bb0ab9b6b6df557b28d93be0bf5c55809",
+  "prompts": {},
+  "sessions": {
+    "s_95bf8578770bcd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "dd3f7f4e-ed5f-49b5-8c23-627dc75c9255",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Abhinav Pandey <abhinavpandey1230@gmail.com>"
+    }
+  }
+}
