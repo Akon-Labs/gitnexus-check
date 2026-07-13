@@ -246,6 +246,68 @@ export interface SinceLastCommit {
   summary: string;
 }
 
+/**
+ * @brief: A single inline review finding produced by the Hub's Wave-2 findings
+ *         stage. The Action renders each anchored item as a line-anchored PR
+ *         review comment and each non-anchored item in the MAIN comment's
+ *         fallback section. Every field the Hub controls is validated by
+ *         `normalizeFindings` before it reaches the renderer — malformed items
+ *         are dropped, never thrown on.
+ *
+ * @params: (fingerprint)     -> Stable dedup/reconcile key; embedded in the
+ *                               review-comment marker so a re-run updates in place.
+ * @params: (checkId)         -> Detector id (e.g. 'removed-export-with-consumers').
+ * @params: (origin)          -> 'deterministic' (Tier-D, graph-proven) or 'generated' (Tier-G, LLM).
+ * @params: (severity)        -> 'warning' | 'error'; drives the badge + the severity floor.
+ * @params: (confidence)      -> 0..1 Hub confidence; drives fallback ordering.
+ * @params: (title/rationale) -> Hub-sanitized display text; the Action still escapes markdown structure.
+ * @params: (path)            -> NEW-side file path the finding is about; the review comment's path.
+ * @params: (anchored)        -> True when the anchor is valid at analyzedSha; false items NEVER become
+ *                               review comments (they render in the fallback section of the main comment).
+ * @params: (anchor)          -> NEW-side line range valid at analyzedSha; startLine drives the comment line.
+ * @params: (enclosingSymbol) -> Qualified name of the symbol the finding sits in, for context.
+ * @params: (callers)         -> Deterministic known callers (Tier-D), rendered as a file:line list.
+ * @params: (category)        -> Free-form bucket (e.g. 'correctness'); rendered opportunistically.
+ */
+export interface FindingItem {
+  fingerprint: string;
+  checkId: string;
+  origin: 'deterministic' | 'generated';
+  severity: 'warning' | 'error';
+  confidence: number;
+  title: string;
+  rationale: string;
+  path: string;
+  anchored: boolean;
+  anchor?: { startLine: number; endLine: number };
+  enclosingSymbol?: string;
+  callers?: Array<{ filePath: string; startLine?: number }>;
+  category?: string;
+}
+
+/**
+ * @brief: The inline-findings envelope carried on the BlastResult (Wave 2).
+ *         Additive-optional: absent on older Hubs (the feature is entirely
+ *         inert), and gated by schemaVersion — an unrecognised version degrades
+ *         to an error envelope (empty items + a non-null `error`) so the Action
+ *         posts nothing inline rather than mis-rendering semantics it can't read.
+ *
+ * @params: (schemaVersion)  -> Findings envelope schema tag. Non-'1' → error envelope.
+ * @params: (analyzedSha)    -> The commit the anchors are valid at; the MANDATORY review commit_id.
+ * @params: (items)          -> Validated findings; malformed members dropped by normalizeFindings.
+ * @params: (suppressedCount)-> Hub-side noise-budget suppressions (surfaced to the user).
+ * @params: (truncated)      -> Hub-side stage time-box marker.
+ * @params: (error)          -> Non-null when the stage could not run; null when it ran cleanly.
+ */
+export interface FindingsResult {
+  schemaVersion: string;
+  analyzedSha: string | null;
+  items: FindingItem[];
+  suppressedCount: number;
+  truncated: boolean;
+  error: string | null;
+}
+
 export interface BlastResult {
   blastLevel: BlastLevel;
 
@@ -287,6 +349,12 @@ export interface BlastResult {
   // Absent on older Hubs; null when there is no prior commit to diff against.
   // Rendered above the digest in the single upsert-by-marker comment.
   sinceLastCommit?: SinceLastCommit | null;
+
+  // Inline review findings produced by the Hub's Wave-2 findings stage. Absent
+  // on older Hubs (feature inert) and gated by normalizeFindings — the Action
+  // posts line-anchored review comments for anchored items and demotes the rest
+  // to the main comment's fallback section. Best-effort: never affects the gate.
+  findings?: FindingsResult;
 }
 
 /**
@@ -439,6 +507,7 @@ export function normalizeBlastResult(value: BlastResult): BlastResult {
     crossRepo: normalizeCrossRepo(value.crossRepo),
     aiSummary: typeof value.aiSummary === 'string' ? value.aiSummary : null,
     sinceLastCommit: normalizeSinceLastCommit(value.sinceLastCommit),
+    findings: normalizeFindings(value.findings),
     truncated: Boolean(value.truncated),
     stale: Boolean(value.stale),
     prTitle: value.prTitle ?? null,
@@ -500,6 +569,142 @@ function normalizeCrossRepo(v: unknown): CrossRepoResult {
     result.notYetKnowable = v.notYetKnowable as NotYetKnowableSymbol[];
   }
   return result;
+}
+
+/**
+ * @brief: Coerce an unknown `findings` value into a well-formed FindingsResult,
+ *         or `undefined` when the feature is inert. Absent / non-object → undefined
+ *         (old Hubs: the Action does nothing). A `schemaVersion` other than '1'
+ *         degrades to an error envelope (empty items + `error`) so nothing is
+ *         posted inline. Otherwise every item is validated by
+ *         `normalizeFindingItem`; malformed items are dropped, never thrown on.
+ *
+ *         This is the sole type gate for the findings envelope — mirroring the
+ *         `normalizeSinceLastCommit` / `normalizeCrossRepo` discipline. Call it on
+ *         the raw Hub `findings` field; `isBlastResult` intentionally does NOT
+ *         inspect findings (its semantics are unchanged across this addition).
+ *
+ * @params: (v: unknown) -> The `findings` field off a Hub response body.
+ *
+ * @returns: FindingsResult | undefined — the envelope, or undefined when inert.
+ */
+export function normalizeFindings(v: unknown): FindingsResult | undefined {
+  // Absent, non-object, or an array (never a valid envelope) → feature inert.
+  if (!isObject(v) || Array.isArray(v)) return undefined;
+  const sv = typeof v.schemaVersion === 'string' ? v.schemaVersion : undefined;
+  if (sv !== undefined && sv !== '1') {
+    return {
+      schemaVersion: '1',
+      analyzedSha: normalizeAnalyzedSha(v.analyzedSha),
+      items: [],
+      suppressedCount: normalizeCount(v.suppressedCount),
+      truncated: Boolean(v.truncated),
+      error: 'unsupported findings schema',
+    };
+  }
+  const items: FindingItem[] = [];
+  if (Array.isArray(v.items)) {
+    for (const raw of v.items) {
+      const item = normalizeFindingItem(raw);
+      if (item) items.push(item);
+    }
+  }
+  return {
+    schemaVersion: '1',
+    analyzedSha: normalizeAnalyzedSha(v.analyzedSha),
+    items,
+    suppressedCount: normalizeCount(v.suppressedCount),
+    truncated: Boolean(v.truncated),
+    error: typeof v.error === 'string' ? v.error : null,
+  };
+}
+
+/**
+ * @brief: Validate one findings item off the shallow-parsed envelope. Returns a
+ *         well-formed FindingItem or null (dropped). Requires the load-bearing
+ *         fields the Action needs to reconcile, post, and render: a non-empty
+ *         fingerprint (marker + reconcile key), a string checkId, a known
+ *         origin/severity, a finite confidence, non-empty title/path, a string
+ *         rationale, and a boolean anchored. An `anchored: true` item whose
+ *         anchor is missing or malformed is DEMOTED to `anchored: false` (it can
+ *         never be line-posted without a valid NEW-side line) so the fallback
+ *         section carries it instead of it being silently dropped.
+ */
+function normalizeFindingItem(v: unknown): FindingItem | null {
+  if (!isObject(v)) return null;
+  const { fingerprint, checkId, origin, severity, confidence, title, rationale, path, anchored } = v;
+  if (typeof fingerprint !== 'string' || fingerprint.length === 0) return null;
+  if (typeof checkId !== 'string') return null;
+  if (origin !== 'deterministic' && origin !== 'generated') return null;
+  if (severity !== 'warning' && severity !== 'error') return null;
+  if (typeof confidence !== 'number' || !Number.isFinite(confidence)) return null;
+  if (typeof title !== 'string' || title.length === 0) return null;
+  if (typeof rationale !== 'string') return null;
+  if (typeof path !== 'string' || path.length === 0) return null;
+  if (typeof anchored !== 'boolean') return null;
+
+  const anchor = normalizeAnchor(v.anchor);
+  const item: FindingItem = {
+    fingerprint,
+    checkId,
+    origin,
+    severity,
+    confidence,
+    title,
+    rationale,
+    path,
+    // An anchored item with no valid anchor cannot be line-posted — demote it so
+    // the fallback section carries it rather than the Action losing it entirely.
+    anchored: anchored && anchor !== undefined,
+  };
+  if (anchor) item.anchor = anchor;
+  if (typeof v.enclosingSymbol === 'string' && v.enclosingSymbol.length > 0) {
+    item.enclosingSymbol = v.enclosingSymbol;
+  }
+  const callers = normalizeCallers(v.callers);
+  if (callers.length > 0) item.callers = callers;
+  if (typeof v.category === 'string' && v.category.length > 0) item.category = v.category;
+  return item;
+}
+
+/** Validate a NEW-side anchor range; both lines must be positive and ordered. */
+function normalizeAnchor(v: unknown): { startLine: number; endLine: number } | undefined {
+  if (!isObject(v)) return undefined;
+  const { startLine, endLine } = v;
+  if (typeof startLine !== 'number' || !Number.isFinite(startLine) || startLine <= 0) {
+    return undefined;
+  }
+  if (typeof endLine !== 'number' || !Number.isFinite(endLine) || endLine < startLine) {
+    return undefined;
+  }
+  return { startLine, endLine };
+}
+
+/** Validate the known-callers list; drop entries without a non-empty filePath. */
+function normalizeCallers(v: unknown): Array<{ filePath: string; startLine?: number }> {
+  if (!Array.isArray(v)) return [];
+  const out: Array<{ filePath: string; startLine?: number }> = [];
+  for (const c of v) {
+    if (!isObject(c)) continue;
+    const { filePath, startLine } = c;
+    if (typeof filePath !== 'string' || filePath.length === 0) continue;
+    out.push(
+      typeof startLine === 'number' && Number.isFinite(startLine) && startLine > 0
+        ? { filePath, startLine }
+        : { filePath },
+    );
+  }
+  return out;
+}
+
+/** A non-empty analyzedSha string, else null (the review commit_id is mandatory). */
+function normalizeAnalyzedSha(v: unknown): string | null {
+  return typeof v === 'string' && v.length > 0 ? v : null;
+}
+
+/** A non-negative integer count, else 0. */
+function normalizeCount(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0;
 }
 
 function clampBlastLevel(v: string): BlastLevel {

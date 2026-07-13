@@ -38,6 +38,8 @@ const ghContext = {
     repository: undefined as { full_name?: string } | undefined,
     pull_request: {
       number: 152,
+      // Draft flag exercised by the Wave-2 gated draft-skip tests; reset each run.
+      draft: undefined as boolean | undefined,
       head: { sha: undefined as unknown } as {
         sha: unknown;
         repo?: { full_name?: string } | null;
@@ -47,12 +49,13 @@ const ghContext = {
   repo: { owner: 'Akon-Labs', repo: 'gitnexus-enterprise' },
 };
 
+const updateCommentSpy = vi.fn();
 const getOctokitSpy = vi.fn(() => ({
   paginate: { iterator: vi.fn() },
   rest: {
     issues: {
       createComment: vi.fn(),
-      updateComment: vi.fn(),
+      updateComment: updateCommentSpy,
     },
   },
 }));
@@ -88,6 +91,16 @@ vi.mock('../src/post-comment', async () => {
   };
 });
 
+const reconcileSpy = vi.fn();
+vi.mock('../src/post-review', async () => {
+  const real = await vi.importActual<typeof import('../src/post-review')>('../src/post-review');
+  return {
+    ...real,
+    reconcileFindings: (...args: unknown[]) => reconcileSpy(...args),
+    asReviewClient: vi.fn(() => ({})),
+  };
+});
+
 const parseThresholdSpy = vi.fn();
 const evaluateGateSpy = vi.fn();
 vi.mock('../src/gate', async () => {
@@ -114,6 +127,7 @@ beforeEach(() => {
   ghContext.eventName = 'pull_request';
   ghContext.payload.repository = undefined;
   ghContext.payload.pull_request.number = 152;
+  ghContext.payload.pull_request.draft = undefined;
   ghContext.payload.pull_request.head = { sha: undefined };
   setFailedSpy.mockReset();
   warningSpy.mockReset();
@@ -123,8 +137,11 @@ beforeEach(() => {
   refreshSpy.mockReset();
   getBlastSpy.mockReset();
   postSpy.mockReset();
+  updateCommentSpy.mockReset();
   parseThresholdSpy.mockReset();
   evaluateGateSpy.mockReset();
+  reconcileSpy.mockReset();
+  reconcileSpy.mockResolvedValue({ posted: 0, updated: 0, failed: [] });
   // Default: advisory gate (empty input → null threshold → neutral).
   parseThresholdSpy.mockReturnValue(null);
   evaluateGateSpy.mockReturnValue('neutral');
@@ -650,5 +667,229 @@ describe('main — token safety', () => {
       .map((c) => c.map((x) => String(x)).join(' '))
       .join('\n');
     expect(allCalls).not.toContain('gnx_secret_VERY_DO_NOT_LEAK');
+  });
+});
+
+describe('main — inline findings (Wave 2)', () => {
+  const anchoredItem = {
+    fingerprint: 'a1',
+    checkId: 'chk',
+    origin: 'deterministic',
+    severity: 'error',
+    confidence: 1,
+    title: 'boom',
+    rationale: 'why',
+    path: 'src/a.ts',
+    anchored: true,
+    anchor: { startLine: 10, endLine: 10 },
+  };
+  const demotedItem = {
+    fingerprint: 'd1',
+    checkId: 'chk',
+    origin: 'generated',
+    severity: 'warning',
+    confidence: 0.9,
+    title: 'soft',
+    rationale: 'demoted',
+    path: 'src/b.ts',
+    anchored: false,
+  };
+
+  async function setupBlast(findings?: unknown): Promise<void> {
+    resolveSpy.mockResolvedValue('repo-uuid');
+    refreshSpy.mockResolvedValue(undefined);
+    const blastRaw = loadFullBlast();
+    const { isBlastResult, normalizeBlastResult } = await import('../src/types/blast-result');
+    if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
+    const blast = normalizeBlastResult(blastRaw) as Record<string, unknown>;
+    if (findings) blast.findings = findings;
+    getBlastSpy.mockResolvedValue(blast);
+    postSpy.mockResolvedValue({ commentId: 1, action: 'created' });
+  }
+
+  it('flag OFF: no reconcile, outputs are 0, only the main comment is posted', async () => {
+    await setupBlast({
+      schemaVersion: '1', analyzedSha: 'sha', items: [anchoredItem],
+      suppressedCount: 3, truncated: false, error: null,
+    });
+    const { main } = await import('../src/main');
+    await main();
+    expect(reconcileSpy).not.toHaveBeenCalled();
+    expect(postSpy).toHaveBeenCalledOnce();
+    expect(outputs['inline-findings-posted']).toBe('0');
+    expect(outputs['inline-findings-suppressed']).toBe('0');
+  });
+
+  it('flag ON: reconciles anchored findings with analyzedSha; posted + Hub-suppressed outputs', async () => {
+    inputs['inline-findings'] = 'true';
+    await setupBlast({
+      schemaVersion: '1', analyzedSha: 'sha123', items: [anchoredItem],
+      suppressedCount: 2, truncated: false, error: null,
+    });
+    reconcileSpy.mockResolvedValue({ posted: 1, updated: 0, failed: [] });
+    const { main } = await import('../src/main');
+    await main();
+    expect(reconcileSpy).toHaveBeenCalledOnce();
+    const arg = reconcileSpy.mock.calls[0][0] as { analyzedSha: string; items: unknown[] };
+    expect(arg.analyzedSha).toBe('sha123');
+    expect(arg.items).toHaveLength(1);
+    expect(outputs['inline-findings-posted']).toBe('1');
+    expect(outputs['inline-findings-suppressed']).toBe('2');
+    // Nothing demoted/failed → the main comment is NOT re-posted.
+    expect(postSpy).toHaveBeenCalledOnce();
+  });
+
+  it('flag ON: appends the fallback section by UPDATING the main comment directly (id reuse)', async () => {
+    inputs['inline-findings'] = 'true';
+    await setupBlast({
+      schemaVersion: '1', analyzedSha: 'sha', items: [anchoredItem, demotedItem],
+      suppressedCount: 0, truncated: false, error: null,
+    });
+    reconcileSpy.mockResolvedValue({ posted: 1, updated: 0, failed: [] });
+    const { main } = await import('../src/main');
+    await main();
+    // §7 posts the main comment once; §6d reuses its id via a direct
+    // updateComment instead of re-listing the thread to rediscover it.
+    expect(postSpy).toHaveBeenCalledOnce();
+    expect(updateCommentSpy).toHaveBeenCalledOnce();
+    const fallbackCall = updateCommentSpy.mock.calls[0][0] as {
+      comment_id: number;
+      body: string;
+    };
+    expect(fallbackCall.comment_id).toBe(1); // the id §7's post returned
+    expect(fallbackCall.body).toContain('## Findings not shown inline');
+  });
+
+  it('flag ON: surfaces the Hub time-box marker even with nothing demoted', async () => {
+    inputs['inline-findings'] = 'true';
+    await setupBlast({
+      schemaVersion: '1', analyzedSha: 'sha', items: [anchoredItem],
+      suppressedCount: 0, truncated: true, error: null,
+    });
+    reconcileSpy.mockResolvedValue({ posted: 1, updated: 0, failed: [] });
+    const { main } = await import('../src/main');
+    await main();
+    expect(updateCommentSpy).toHaveBeenCalledOnce();
+    const body = (updateCommentSpy.mock.calls[0][0] as { body: string }).body;
+    expect(body).toContain('time budget');
+  });
+
+  it('flag ON but the Hub reported a findings error: skips entirely, outputs 0', async () => {
+    inputs['inline-findings'] = 'true';
+    await setupBlast({
+      schemaVersion: '1', analyzedSha: 'sha', items: [],
+      suppressedCount: 0, truncated: false, error: 'unsupported findings schema',
+    });
+    const { main } = await import('../src/main');
+    await main();
+    expect(reconcileSpy).not.toHaveBeenCalled();
+    expect(outputs['inline-findings-posted']).toBe('0');
+    expect(outputs['inline-findings-suppressed']).toBe('0');
+    expect(postSpy).toHaveBeenCalledOnce();
+  });
+
+  it('flag ON but no findings envelope (old Hub): skips, outputs 0', async () => {
+    inputs['inline-findings'] = 'true';
+    await setupBlast(undefined);
+    const { main } = await import('../src/main');
+    await main();
+    expect(reconcileSpy).not.toHaveBeenCalled();
+    expect(outputs['inline-findings-posted']).toBe('0');
+  });
+
+  it('severity floor "error" narrows out warning findings and counts them suppressed', async () => {
+    inputs['inline-findings'] = 'true';
+    inputs['inline-severity-floor'] = 'error';
+    const warnAnchored = { ...anchoredItem, fingerprint: 'w', severity: 'warning' };
+    await setupBlast({
+      schemaVersion: '1', analyzedSha: 'sha', items: [anchoredItem, warnAnchored],
+      suppressedCount: 0, truncated: false, error: null,
+    });
+    reconcileSpy.mockResolvedValue({ posted: 1, updated: 0, failed: [] });
+    const { main } = await import('../src/main');
+    await main();
+    const arg = reconcileSpy.mock.calls[0][0] as { items: Array<{ fingerprint: string }> };
+    expect(arg.items).toHaveLength(1);
+    expect(arg.items[0].fingerprint).toBe('a1');
+    expect(outputs['inline-findings-suppressed']).toBe('1');
+  });
+
+  it('a thrown reconcile never fails the run; outputs still resolve', async () => {
+    inputs['inline-findings'] = 'true';
+    await setupBlast({
+      schemaVersion: '1', analyzedSha: 'sha', items: [anchoredItem],
+      suppressedCount: 0, truncated: false, error: null,
+    });
+    reconcileSpy.mockRejectedValue(new Error('reconcile boom'));
+    const { main } = await import('../src/main');
+    await main();
+    expect(setFailedSpy).not.toHaveBeenCalled();
+    expect(outputs['inline-findings-posted']).toBe('0');
+    expect(outputs['gate-decision']).toBe('neutral');
+  });
+
+  it('fork + flag ON: no review posts, no comment, outputs 0', async () => {
+    inputs['inline-findings'] = 'true';
+    ghContext.payload.repository = { full_name: 'Akon-Labs/gitnexus-enterprise' };
+    ghContext.payload.pull_request.head = {
+      sha: undefined,
+      repo: { full_name: 'attacker/gitnexus-enterprise' },
+    };
+    await setupBlast({
+      schemaVersion: '1', analyzedSha: 'sha', items: [anchoredItem],
+      suppressedCount: 0, truncated: false, error: null,
+    });
+    const { main } = await import('../src/main');
+    await main();
+    expect(reconcileSpy).not.toHaveBeenCalled();
+    expect(postSpy).not.toHaveBeenCalled();
+    expect(outputs['inline-findings-posted']).toBe('0');
+    expect(setFailedSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('main — gated draft-skip (Wave 2)', () => {
+  async function setupHappy(): Promise<void> {
+    resolveSpy.mockResolvedValue('repo-uuid');
+    refreshSpy.mockResolvedValue(undefined);
+    const blastRaw = loadFullBlast();
+    const { isBlastResult, normalizeBlastResult } = await import('../src/types/blast-result');
+    if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
+    getBlastSpy.mockResolvedValue(normalizeBlastResult(blastRaw));
+    postSpy.mockResolvedValue({ commentId: 1, action: 'created' });
+  }
+
+  it('draft + flag ON: exits before any Hub call and posts nothing', async () => {
+    inputs['inline-findings'] = 'true';
+    ghContext.payload.pull_request.draft = true;
+    await setupHappy();
+    const { main } = await import('../src/main');
+    await main();
+    expect(resolveSpy).not.toHaveBeenCalled();
+    expect(refreshSpy).not.toHaveBeenCalled();
+    expect(getBlastSpy).not.toHaveBeenCalled();
+    expect(postSpy).not.toHaveBeenCalled();
+    expect(setFailedSpy).not.toHaveBeenCalled();
+    const logged = infoSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged.toLowerCase()).toContain('draft');
+  });
+
+  it('draft + flag OFF: normal run (draft-skip is gated behind inline-findings)', async () => {
+    ghContext.payload.pull_request.draft = true; // flag off by default
+    await setupHappy();
+    const { main } = await import('../src/main');
+    await main();
+    expect(resolveSpy).toHaveBeenCalledOnce();
+    expect(postSpy).toHaveBeenCalledOnce();
+  });
+
+  it('non-draft + flag ON: runs normally (not skipped)', async () => {
+    inputs['inline-findings'] = 'true';
+    ghContext.payload.pull_request.draft = false;
+    await setupHappy();
+    const { main } = await import('../src/main');
+    await main();
+    expect(resolveSpy).toHaveBeenCalledOnce();
+    expect(postSpy).toHaveBeenCalled();
   });
 });
