@@ -341,6 +341,84 @@ describe('normalizeBlastResult', () => {
   });
 });
 
+describe('crossRepo HTTP symbol tier through normalize', () => {
+  const base = {
+    blastLevel: 'HIGH',
+    truncated: false,
+    computedAt: 'x',
+  } as unknown as BlastResult;
+
+  it('carries notYetKnowable through verbatim when it is an array', () => {
+    const nyk = [{ name: 'newExport', filePath: 'src/a.ts' }];
+    const out = normalizeBlastResult({
+      ...base,
+      crossRepo: {
+        schemaVersion: '1',
+        findings: [],
+        groups: [],
+        truncated: false,
+        error: null,
+        notYetKnowable: nyk,
+      },
+    } as unknown as BlastResult);
+    expect(out.crossRepo?.notYetKnowable).toEqual(nyk);
+  });
+
+  it('omits notYetKnowable (never coerces to []) for a non-array / malformed value', () => {
+    const out = normalizeBlastResult({
+      ...base,
+      crossRepo: {
+        schemaVersion: '1',
+        findings: [],
+        groups: [],
+        truncated: false,
+        error: null,
+        notYetKnowable: 'oops',
+      },
+    } as unknown as BlastResult);
+    expect(out.crossRepo?.notYetKnowable).toBeUndefined();
+    // Absent (zero-state) crossRepo also has no notYetKnowable key.
+    expect(normalizeBlastResult(base).crossRepo?.notYetKnowable).toBeUndefined();
+  });
+
+  it('preserves the additive symbol fields (providerContract, callSites, consumerD1Count, startLine)', () => {
+    const finding = {
+      kind: 'symbol',
+      consumerRepo: 'org/consumer',
+      consumerSymbol: { name: 'refreshPr', filePath: 'src/hub-client.ts', startLine: 118 },
+      providerSymbol: { name: 'refreshBlast', filePath: 'src/routes/blast.ts', symbolLabel: 'Route' },
+      via: 'http:GET /api/repos/*/prs/*/refresh',
+      edgeType: 'FETCHES',
+      detectionTier: 'tier3_http_graph',
+      confidence: 0.9,
+      providerContract: { kind: 'http', method: 'GET', path: '/api/repos/*/prs/*/refresh' },
+      callSites: [{ filePath: 'src/hub-client.ts', startLine: 118 }],
+      consumerD1Count: 4,
+    };
+    const out = normalizeBlastResult({
+      ...base,
+      crossRepo: { schemaVersion: '1', findings: [finding], groups: [], truncated: false, error: null },
+    } as unknown as BlastResult);
+    expect(out.crossRepo?.findings[0]).toEqual(finding);
+  });
+
+  it('degrading an unknown schemaVersion drops notYetKnowable with the findings', () => {
+    const out = normalizeBlastResult({
+      ...base,
+      crossRepo: {
+        schemaVersion: '9',
+        findings: [],
+        groups: [],
+        truncated: false,
+        error: null,
+        notYetKnowable: [{ name: 'x' }],
+      },
+    } as unknown as BlastResult);
+    expect(out.crossRepo?.error).toContain('unsupported crossRepo schema version: 9');
+    expect(out.crossRepo?.notYetKnowable).toBeUndefined();
+  });
+});
+
 describe('AffectedFlow shape through normalize', () => {
   it('preserves the tightened optional flow fields verbatim', () => {
     const v = {

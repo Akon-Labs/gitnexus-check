@@ -106,16 +106,29 @@ export interface BlastGraphData {
  *         `kind` is the renderer's switch discriminant; the remaining fields
  *         are tolerated-optional in spirit (the Hub may add more), but the
  *         renderer only reads what it needs and guards each access.
+ *
+ *         The HTTP symbol tier (W1.2b) adds three additive-optional fields —
+ *         they carry no schema bump (the envelope stays schemaVersion '1') and
+ *         are simply absent on older Hubs, so every read below is guarded:
+ *         `consumerSymbol.startLine` (call-site line for the imported-symbol
+ *         channel), `providerContract` (the coupled HTTP route — kind 'http'
+ *         plus method/path — which routes a sym→sym edge into the "HTTP routes"
+ *         channel), `callSites` (the consumer's depth-1 call sites, capped ~5
+ *         by the Hub), and `consumerD1Count` (full direct-caller count, ≥ the
+ *         rendered callSites length).
  */
 export interface SymbolCrossRepoFinding {
   kind: 'symbol';
   consumerRepo: string;
-  consumerSymbol: { name: string; filePath: string } | null;
+  consumerSymbol: { name: string; filePath: string; startLine?: number | null } | null;
   providerSymbol: { name: string; filePath: string; symbolLabel: string } | null;
   via: string;
   edgeType: string;
   detectionTier: string;
   confidence: number;
+  providerContract?: { kind: string; method?: string; path?: string };
+  callSites?: { filePath: string; startLine: number }[];
+  consumerD1Count?: number;
 }
 
 /** A whole repo consumes a changed contract artifact (HTTP route, proto, topic, …). */
@@ -159,6 +172,19 @@ export interface CrossRepoGroup {
 }
 
 /**
+ * @brief: A symbol changed in THIS PR that is brand-new here (an added export),
+ *         so no cross-repo edge to it can exist yet — its downstream impact is
+ *         "not yet knowable" until a consumer re-analyzes against the new
+ *         surface. The Hub owns the element shape; the renderer reports only the
+ *         count, so both fields are optional and the array is carried through
+ *         `normalizeCrossRepo` verbatim.
+ */
+export interface NotYetKnowableSymbol {
+  name?: string;
+  filePath?: string;
+}
+
+/**
  * @brief: Cross-repo blast-radius envelope returned by the Hub alongside the
  *         single-repo result. The Hub emits a populated envelope when the
  *         repo belongs to a ready group, or a zero-state envelope otherwise;
@@ -176,6 +202,11 @@ export interface CrossRepoGroup {
  * @params: (truncated)     -> Hub-side cap marker on the findings list.
  * @params: (error)         -> Non-null when the join could-not-run; null when it
  *                             ran cleanly (distinct from an empty findings list).
+ * @params: (notYetKnowable)-> Changed symbols that are brand-new in this PR, so
+ *                             their cross-repo impact cannot be computed yet.
+ *                             Additive-optional; omitted (not `[]`) when the Hub
+ *                             sends nothing or a malformed value, so an absent
+ *                             field reads as count 0.
  */
 export interface CrossRepoResult {
   schemaVersion: string;
@@ -183,6 +214,7 @@ export interface CrossRepoResult {
   groups: CrossRepoGroup[];
   truncated: boolean;
   error: string | null;
+  notYetKnowable?: NotYetKnowableSymbol[];
 }
 
 /**
@@ -452,13 +484,22 @@ function normalizeCrossRepo(v: unknown): CrossRepoResult {
   // switches on `kind` with a default no-op, so malformed members render as
   // nothing rather than throwing — deep per-finding validation would reject
   // valid responses from a Hub that adds fields.
-  return {
+  const result: CrossRepoResult = {
     schemaVersion: '1',
     findings: Array.isArray(v.findings) ? (v.findings as CrossRepoFinding[]) : [],
     groups: Array.isArray(v.groups) ? (v.groups as CrossRepoGroup[]) : [],
     truncated: Boolean(v.truncated),
     error: typeof v.error === 'string' ? v.error : null,
   };
+  // Carry `notYetKnowable` through verbatim when it is an array (the Hub emits it
+  // for PRs that add brand-new exports). Tolerant: a non-array / malformed value
+  // is omitted rather than coerced to `[]`, so the renderer's `?.length ?? 0`
+  // reads it as count 0 and the caveat stays silent — matching the absent-field
+  // case and preserving the byte-identical zero-state render.
+  if (Array.isArray(v.notYetKnowable)) {
+    result.notYetKnowable = v.notYetKnowable as NotYetKnowableSymbol[];
+  }
+  return result;
 }
 
 function clampBlastLevel(v: string): BlastLevel {
