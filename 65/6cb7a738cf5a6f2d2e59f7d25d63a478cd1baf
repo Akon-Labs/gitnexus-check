@@ -1,0 +1,39 @@
+test/main.test.ts
+  s_95bf8578770bcd::t_a18c2a7ee5881b 989-1002,1014-1077,1104
+  s_95bf8578770bcd::t_91f417364e9c9f 1078-1103
+  s_95bf8578770bcd::t_a2c74fcf9130c0 1003-1013
+dist/index.js
+  s_95bf8578770bcd::t_ed58c6a94607d6 34925-34932,34945-34950,34952-34962,34964-34991,35007-35009,35011,35057-35067,37128,37258-37276,37308
+  s_95bf8578770bcd::t_c8ccb5c5f7c6da 35107-35109,35119-35126
+  s_95bf8578770bcd::t_bd223fea386f71 35127
+src/types/blast-result.ts
+  s_95bf8578770bcd::t_c21fb0ebf1c5e8 379-384
+  s_95bf8578770bcd::t_7683da89421f49 557
+  s_95bf8578770bcd::t_2291b5e8086479 508-525
+  s_95bf8578770bcd::t_98547e06826d20 311-331,507
+test/blast-result.test.ts
+  s_95bf8578770bcd::t_a5e4ccdcda618b 186-225
+  s_95bf8578770bcd::t_31919d33a7077b 9
+src/main.ts
+  s_95bf8578770bcd::t_5336b74e5c4279 141-149
+  s_95bf8578770bcd::t_45713737a905d8 283-295
+  s_95bf8578770bcd::t_cd59e271d4e84b 162-181
+  s_95bf8578770bcd::t_e1b5bfb955adda 335-337,346-355
+  s_95bf8578770bcd::t_6536c9373eae5a 230-232,234
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "656cb7a738cf5a6f2d2e59f7d25d63a478cd1baf",
+  "prompts": {},
+  "sessions": {
+    "s_95bf8578770bcd": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "dd3f7f4e-ed5f-49b5-8c23-627dc75c9255",
+        "model": "claude-opus-4-8"
+      },
+      "human_author": "Abhinav Pandey <abhinavpandey1230@gmail.com>"
+    }
+  }
+}
