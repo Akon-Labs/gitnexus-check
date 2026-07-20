@@ -986,3 +986,119 @@ describe('main — gated draft-skip (Wave 2)', () => {
     expect(postSpy).toHaveBeenCalled();
   });
 });
+
+describe('main — D1 App-primary gate', () => {
+  const anchoredItem = {
+    fingerprint: 'a1',
+    checkId: 'chk',
+    origin: 'deterministic',
+    severity: 'error',
+    confidence: 1,
+    title: 'boom',
+    rationale: 'why',
+    path: 'src/a.ts',
+    anchored: true,
+    anchor: { startLine: 10, endLine: 10 },
+  };
+  const demotedItem = {
+    fingerprint: 'd1',
+    checkId: 'chk',
+    origin: 'generated',
+    severity: 'warning',
+    confidence: 0.9,
+    title: 'soft',
+    rationale: 'demoted',
+    path: 'src/b.ts',
+    anchored: false,
+  };
+
+  async function setupBlast(over: Record<string, unknown>): Promise<void> {
+    resolveSpy.mockResolvedValue('repo-uuid');
+    refreshSpy.mockResolvedValue(undefined);
+    const blastRaw = loadFullBlast();
+    const { isBlastResult, normalizeBlastResult } = await import('../src/types/blast-result');
+    if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
+    const blast = normalizeBlastResult(blastRaw) as Record<string, unknown>;
+    Object.assign(blast, over);
+    getBlastSpy.mockResolvedValue(blast);
+    postSpy.mockResolvedValue({ commentId: 1, action: 'created' });
+  }
+
+  it('App owns SUMMARY → does NOT post the main comment, but the gate still runs', async () => {
+    await setupBlast({ appReview: { active: true, summary: true, inlineFindings: false } });
+    const { main } = await import('../src/main');
+    await main();
+    expect(postSpy).not.toHaveBeenCalled(); // ceded to the App
+    expect(outputs['blast-level']).toBe('LOW'); // gate still ran from blastLevel
+    expect(setFailedSpy).not.toHaveBeenCalled();
+    const logged = infoSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged).toContain('owns the summary comment');
+  });
+
+  it('App owns SUMMARY → does NOT post the since-last-commit comment either', async () => {
+    await setupBlast({
+      appReview: { active: true, summary: true, inlineFindings: false },
+      sinceLastCommit: { headSha: 'deadbee', summary: 'delta prose' },
+    });
+    const { main } = await import('../src/main');
+    await main();
+    // postSpy backs BOTH the main comment and the since-last-commit comment.
+    expect(postSpy).not.toHaveBeenCalled();
+  });
+
+  it('App owns INLINE FINDINGS → does NOT reconcile, but still posts the summary (surface not ceded)', async () => {
+    inputs['inline-findings'] = 'true';
+    ghContext.payload.pull_request.head = { sha: 'abc1234' };
+    await setupBlast({
+      appReview: { active: true, summary: false, inlineFindings: true },
+      findings: {
+        schemaVersion: '1',
+        analyzedSha: 'abc1234',
+        items: [anchoredItem],
+        suppressedCount: 0,
+        truncated: false,
+        error: null,
+      },
+    });
+    const { main } = await import('../src/main');
+    await main();
+    expect(reconcileSpy).not.toHaveBeenCalled(); // inline ceded to the App
+    expect(postSpy).toHaveBeenCalledOnce(); // summary NOT ceded → Action still posts it
+    expect(outputs['inline-findings-posted']).toBe('0');
+    const logged = infoSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged).toContain('owns inline findings');
+  });
+
+  it('default appReview (all-false) → posts as legacy (App owns nothing)', async () => {
+    await setupBlast({ appReview: { active: false, summary: false, inlineFindings: false } });
+    const { main } = await import('../src/main');
+    await main();
+    expect(postSpy).toHaveBeenCalledOnce();
+  });
+
+  it('App owns SUMMARY + inline active + demoted findings → reconciles inline but NEVER re-posts the summary (no double-post)', async () => {
+    // The exact per-surface split D1 supports. Regression guard: the demoted-findings
+    // fallback must NOT re-create the ceded summary comment under COMMENT_MARKER.
+    inputs['inline-findings'] = 'true';
+    ghContext.payload.pull_request.head = { sha: 'abc1234' };
+    reconcileSpy.mockResolvedValue({ posted: 1, updated: 0, failed: [] });
+    await setupBlast({
+      appReview: { active: true, summary: true, inlineFindings: false },
+      findings: {
+        schemaVersion: '1',
+        analyzedSha: 'abc1234',
+        items: [anchoredItem, demotedItem], // demotedItem (non-anchored) → fallback section
+        suppressedCount: 0,
+        truncated: false,
+        error: null,
+      },
+    });
+    const { main } = await import('../src/main');
+    await main();
+    expect(reconcileSpy).toHaveBeenCalledOnce(); // inline surface NOT ceded → still posts
+    expect(postSpy).not.toHaveBeenCalled(); // summary ceded → NO summary comment re-created
+    expect(updateCommentSpy).not.toHaveBeenCalled(); // no Action main comment to update
+    const logged = infoSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged).toContain('not re-posting'); // demoted findings logged instead
+  });
+});

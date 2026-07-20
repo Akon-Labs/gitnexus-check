@@ -138,6 +138,15 @@ export async function main(): Promise<void> {
   const hasDigest = typeof blast.aiSummary === 'string' && blast.aiSummary.trim().length > 0;
   const body = hasDigest ? composeWithDigest(rawBody, blast.aiSummary ?? '') : rawBody;
 
+  // ── D1 App-primary gate: when the native GitNexus App bot owns a review surface
+  //    for this repo, the Action cedes exactly that surface so the two never
+  //    double-post. Per-surface (summary comment + since-last-commit vs inline
+  //    findings) so a migration can hand over one at a time. Defaults to false (App
+  //    owns nothing) on older Hubs and any malformed value → legacy behavior. The
+  //    GATE is unaffected — it is decided from blastLevel alone, below.
+  const appOwnsSummary = blast.appReview?.summary === true;
+  const appOwnsInlineFindings = blast.appReview?.inlineFindings === true;
+
   // ── 7. Post (or update) the MAIN comment. We ATTEMPT the write even on a fork:
   //        a fork PR CAN carry write access (pull_request_target, or a configured
   //        write PAT as github-token), so isFork is NOT proof we can't post. We
@@ -150,17 +159,26 @@ export async function main(): Promise<void> {
   //        case the rendered review is logged so a failed gate's "See action
   //        log." points at the report.
   let posted;
-  try {
-    const octokit = github.getOctokit(githubToken);
-    posted = await postOrUpdateComment({
-      client: asIssueCommentsClient(octokit),
-      owner,
-      repo,
-      prNumber,
-      marker: COMMENT_MARKER,
-      body,
-    });
-  } catch (err) {
+  if (appOwnsSummary) {
+    // The App bot posts the summary comment for this repo — cede it (D1). The gate
+    // below still runs; log the rendered review so "See action log." still resolves.
+    core.info(
+      'GitNexus App bot owns the summary comment for this repo — the Action is not ' +
+        'posting it (D1 App-primary). The rendered review follows and the gate still applies.',
+    );
+    core.info(body);
+  } else
+    try {
+      const octokit = github.getOctokit(githubToken);
+      posted = await postOrUpdateComment({
+        client: asIssueCommentsClient(octokit),
+        owner,
+        repo,
+        prNumber,
+        marker: COMMENT_MARKER,
+        body,
+      });
+    } catch (err) {
     // Posting the review comment is PRESENTATION — the Hub compute already
     // succeeded and the gate below decides pass/fail from blastLevel alone. So
     // NO comment-post error ever fails the run (doctrine: comment/findings/fork
@@ -209,8 +227,11 @@ export async function main(): Promise<void> {
   //        comment-id output, or affect the gate — the main review is the contract.
   //        Attempted even on fork PRs (a fork may carry write access); a read-only
   //        403 is swallowed into a warning like any other failure — never pre-skipped.
+  //        The since-last-commit comment is part of the SUMMARY surface, so it is
+  //        also ceded when the App owns the summary (D1) — the App posts its own
+  //        per-push delta comment.
   const delta = blast.sinceLastCommit;
-  if (delta != null) {
+  if (delta != null && !appOwnsSummary) {
     try {
       const octokit = github.getOctokit(githubToken);
       const sincePosted = await postOrUpdateComment({
@@ -259,7 +280,19 @@ export async function main(): Promise<void> {
         `not the current head ${headSha}. They will post once the Hub finishes analyzing this commit.`,
     );
   }
-  if (findingsCfg.enabled && findingsFresh && findings != null && findings.error === null) {
+  if (appOwnsInlineFindings && findingsCfg.enabled && findings != null) {
+    // The App bot posts inline review-comment findings for this repo — cede the
+    // whole inline surface (D1) so the two never double-post. Best-effort/gate
+    // unaffected; the inline outputs stay 0 (the Action posted none).
+    core.info('GitNexus App bot owns inline findings for this repo — the Action is not posting them (D1 App-primary).');
+  }
+  if (
+    !appOwnsInlineFindings &&
+    findingsCfg.enabled &&
+    findingsFresh &&
+    findings != null &&
+    findings.error === null
+  ) {
     try {
       const narrowed = narrowFindings(findings.items, findingsCfg);
       inlineSuppressed = findings.suppressedCount + narrowed.suppressed;
@@ -299,7 +332,9 @@ export async function main(): Promise<void> {
               comment_id: posted.commentId,
               body: composed,
             });
-          } else {
+          } else if (!appOwnsSummary) {
+            // The main-comment post FAILED (fork/403) but we may still have write
+            // access — best-effort fresh post carrying the demoted findings.
             await postOrUpdateComment({
               client: asIssueCommentsClient(github.getOctokit(githubToken)),
               owner,
@@ -308,6 +343,16 @@ export async function main(): Promise<void> {
               marker: COMMENT_MARKER,
               body: composed,
             });
+          } else {
+            // D1: the App owns the summary comment (COMMENT_MARKER). Re-posting the
+            // full summary body here to carry the fallback would DOUBLE-POST the very
+            // surface we just ceded. Do not post — log the demoted section so it
+            // stays visible; surfacing it belongs to the App's comment.
+            core.info(
+              'GitNexus App bot owns the summary comment — the Action is not re-posting it to ' +
+                'carry the non-inline findings (D1). They follow in the log:',
+            );
+            core.info(section);
           }
         }
       }

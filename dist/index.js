@@ -34922,6 +34922,14 @@ async function main() {
     //        call of its own.
     const hasDigest = typeof blast.aiSummary === 'string' && blast.aiSummary.trim().length > 0;
     const body = hasDigest ? (0, slm_format_1.composeWithDigest)(rawBody, blast.aiSummary ?? '') : rawBody;
+    // ── D1 App-primary gate: when the native GitNexus App bot owns a review surface
+    //    for this repo, the Action cedes exactly that surface so the two never
+    //    double-post. Per-surface (summary comment + since-last-commit vs inline
+    //    findings) so a migration can hand over one at a time. Defaults to false (App
+    //    owns nothing) on older Hubs and any malformed value → legacy behavior. The
+    //    GATE is unaffected — it is decided from blastLevel alone, below.
+    const appOwnsSummary = blast.appReview?.summary === true;
+    const appOwnsInlineFindings = blast.appReview?.inlineFindings === true;
     // ── 7. Post (or update) the MAIN comment. We ATTEMPT the write even on a fork:
     //        a fork PR CAN carry write access (pull_request_target, or a configured
     //        write PAT as github-token), so isFork is NOT proof we can't post. We
@@ -34934,46 +34942,54 @@ async function main() {
     //        case the rendered review is logged so a failed gate's "See action
     //        log." points at the report.
     let posted;
-    try {
-        const octokit = github.getOctokit(githubToken);
-        posted = await (0, post_comment_1.postOrUpdateComment)({
-            client: (0, post_comment_1.asIssueCommentsClient)(octokit),
-            owner,
-            repo,
-            prNumber,
-            marker: render_comment_1.COMMENT_MARKER,
-            body,
-        });
-    }
-    catch (err) {
-        // Posting the review comment is PRESENTATION — the Hub compute already
-        // succeeded and the gate below decides pass/fail from blastLevel alone. So
-        // NO comment-post error ever fails the run (doctrine: comment/findings/fork
-        // errors never setFailed; the gate is the contract). We degrade to log-only
-        // and continue, tuning only the message: a fork or a 403 is an expected
-        // read-only case (benign info / actionable permission remedy); any other
-        // error (500, rate-limit, network) is surfaced as a loud error annotation
-        // but is still non-failing.
-        if (isFork) {
-            core.info(isForbidden(err)
-                ? 'Fork PR detected — GITHUB_TOKEN is read-only, so the review comment cannot be posted. ' +
-                    'Running in log-only mode; the rendered review follows and the gate still applies.'
-                : `Fork PR — could not post the review comment (${(0, classify_error_1.classifyError)(err, 'github')}). ` +
-                    'Running in log-only mode; the rendered review follows and the gate still applies.');
-        }
-        else if (isForbidden(err)) {
-            core.error(`Could not post the review comment: ${(0, classify_error_1.classifyError)(err, 'github')}. ` +
-                "If this is a same-repo PR, grant the workflow 'pull-requests: write' " +
-                'permission; the gate still ran on the Hub analysis below.');
-        }
-        else {
-            core.error(`Could not post the review comment: ${(0, classify_error_1.classifyError)(err, 'github')}. ` +
-                'The gate still ran on the Hub analysis below; the rendered review follows in the log.');
-        }
-        // Log the rendered review after any recovered error so a failed gate that
-        // says "See action log." actually points at the report (#5).
+    if (appOwnsSummary) {
+        // The App bot posts the summary comment for this repo — cede it (D1). The gate
+        // below still runs; log the rendered review so "See action log." still resolves.
+        core.info('GitNexus App bot owns the summary comment for this repo — the Action is not ' +
+            'posting it (D1 App-primary). The rendered review follows and the gate still applies.');
         core.info(body);
     }
+    else
+        try {
+            const octokit = github.getOctokit(githubToken);
+            posted = await (0, post_comment_1.postOrUpdateComment)({
+                client: (0, post_comment_1.asIssueCommentsClient)(octokit),
+                owner,
+                repo,
+                prNumber,
+                marker: render_comment_1.COMMENT_MARKER,
+                body,
+            });
+        }
+        catch (err) {
+            // Posting the review comment is PRESENTATION — the Hub compute already
+            // succeeded and the gate below decides pass/fail from blastLevel alone. So
+            // NO comment-post error ever fails the run (doctrine: comment/findings/fork
+            // errors never setFailed; the gate is the contract). We degrade to log-only
+            // and continue, tuning only the message: a fork or a 403 is an expected
+            // read-only case (benign info / actionable permission remedy); any other
+            // error (500, rate-limit, network) is surfaced as a loud error annotation
+            // but is still non-failing.
+            if (isFork) {
+                core.info(isForbidden(err)
+                    ? 'Fork PR detected — GITHUB_TOKEN is read-only, so the review comment cannot be posted. ' +
+                        'Running in log-only mode; the rendered review follows and the gate still applies.'
+                    : `Fork PR — could not post the review comment (${(0, classify_error_1.classifyError)(err, 'github')}). ` +
+                        'Running in log-only mode; the rendered review follows and the gate still applies.');
+            }
+            else if (isForbidden(err)) {
+                core.error(`Could not post the review comment: ${(0, classify_error_1.classifyError)(err, 'github')}. ` +
+                    "If this is a same-repo PR, grant the workflow 'pull-requests: write' " +
+                    'permission; the gate still ran on the Hub analysis below.');
+            }
+            else {
+                core.error(`Could not post the review comment: ${(0, classify_error_1.classifyError)(err, 'github')}. ` +
+                    'The gate still ran on the Hub analysis below; the rendered review follows in the log.');
+            }
+            // Log the rendered review after any recovered error so a failed gate that
+            // says "See action log." actually points at the report (#5).
+            core.info(body);
+        }
     core.setOutput('blast-level', blast.blastLevel);
     if (posted) {
         core.setOutput('comment-id', String(posted.commentId));
@@ -34988,8 +35004,11 @@ async function main() {
     //        comment-id output, or affect the gate — the main review is the contract.
     //        Attempted even on fork PRs (a fork may carry write access); a read-only
     //        403 is swallowed into a warning like any other failure — never pre-skipped.
+    //        The since-last-commit comment is part of the SUMMARY surface, so it is
+    //        also ceded when the App owns the summary (D1) — the App posts its own
+    //        per-push delta comment.
     const delta = blast.sinceLastCommit;
-    if (delta != null) {
+    if (delta != null && !appOwnsSummary) {
         try {
             const octokit = github.getOctokit(githubToken);
             const sincePosted = await (0, post_comment_1.postOrUpdateComment)({
@@ -35035,7 +35054,17 @@ async function main() {
         core.info(`Inline findings skipped: the Hub findings envelope is for ${findings.analyzedSha}, ` +
             `not the current head ${headSha}. They will post once the Hub finishes analyzing this commit.`);
     }
-    if (findingsCfg.enabled && findingsFresh && findings != null && findings.error === null) {
+    if (appOwnsInlineFindings && findingsCfg.enabled && findings != null) {
+        // The App bot posts inline review-comment findings for this repo — cede the
+        // whole inline surface (D1) so the two never double-post. Best-effort/gate
+        // unaffected; the inline outputs stay 0 (the Action posted none).
+        core.info('GitNexus App bot owns inline findings for this repo — the Action is not posting them (D1 App-primary).');
+    }
+    if (!appOwnsInlineFindings &&
+        findingsCfg.enabled &&
+        findingsFresh &&
+        findings != null &&
+        findings.error === null) {
         try {
             const narrowed = narrowFindings(findings.items, findingsCfg);
             inlineSuppressed = findings.suppressedCount + narrowed.suppressed;
@@ -35075,7 +35104,9 @@ async function main() {
                             body: composed,
                         });
                     }
-                    else {
+                    else if (!appOwnsSummary) {
+                        // The main-comment post FAILED (fork/403) but we may still have write
+                        // access — best-effort fresh post carrying the demoted findings.
                         await (0, post_comment_1.postOrUpdateComment)({
                             client: (0, post_comment_1.asIssueCommentsClient)(github.getOctokit(githubToken)),
                             owner,
@@ -35084,6 +35115,15 @@ async function main() {
                             marker: render_comment_1.COMMENT_MARKER,
                             body: composed,
                         });
+                    }
+                    else {
+                        // D1: the App owns the summary comment (COMMENT_MARKER). Re-posting the
+                        // full summary body here to carry the fallback would DOUBLE-POST the very
+                        // surface we just ceded. Do not post — log the demoted section so it
+                        // stays visible; surfacing it belongs to the App's comment.
+                        core.info('GitNexus App bot owns the summary comment — the Action is not re-posting it to ' +
+                            'carry the non-inline findings (D1). They follow in the log:');
+                        core.info(section);
                     }
                 }
             }
@@ -37085,6 +37125,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.EMPTY_CROSS_REPO = void 0;
 exports.isBlastResult = isBlastResult;
 exports.normalizeSinceLastCommit = normalizeSinceLastCommit;
+exports.normalizeAppReview = normalizeAppReview;
 exports.normalizeBlastResult = normalizeBlastResult;
 exports.normalizeFindings = normalizeFindings;
 /**
@@ -37215,6 +37256,25 @@ function normalizeSinceLastCommit(v) {
     return { headSha, summary };
 }
 /**
+ * @brief: Sole type gate for the D1 `appReview` per-surface signal. Fails SAFE:
+ *         absent / non-object / any malformed field → "App owns nothing" (all
+ *         false), so the Action posts as it does today. A surface is skipped ONLY
+ *         on an explicit boolean `true` — anything else (missing, truthy non-bool,
+ *         string 'true') reads as false and the Action keeps posting.
+ *
+ * @params: (v: unknown) -> The `appReview` field off a Hub response body.
+ * @returns: AppReview — always a complete object; defaults to all-false.
+ */
+function normalizeAppReview(v) {
+    if (!isObject(v))
+        return { active: false, summary: false, inlineFindings: false };
+    return {
+        active: v.active === true,
+        summary: v.summary === true,
+        inlineFindings: v.inlineFindings === true,
+    };
+}
+/**
  * @brief: Coerce a BlastResult-shaped object into a fully-populated
  *         BlastResult by filling missing arrays with `[]`, normalising
  *         optional nullable scalars, and clamping `blastLevel` to the
@@ -37245,6 +37305,7 @@ function normalizeBlastResult(value) {
         aiSummary: typeof value.aiSummary === 'string' ? value.aiSummary : null,
         sinceLastCommit: normalizeSinceLastCommit(value.sinceLastCommit),
         findings: normalizeFindings(value.findings),
+        appReview: normalizeAppReview(value.appReview),
         truncated: Boolean(value.truncated),
         stale: Boolean(value.stale),
         prTitle: value.prTitle ?? null,

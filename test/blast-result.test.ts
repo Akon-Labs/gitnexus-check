@@ -6,6 +6,7 @@ import {
   normalizeBlastResult,
   normalizeSinceLastCommit,
   normalizeFindings,
+  normalizeAppReview,
   EMPTY_CROSS_REPO,
   type BlastResult,
 } from '../src/types/blast-result';
@@ -179,6 +180,46 @@ describe('isBlastResult', () => {
     const base = { blastLevel: 'LOW', truncated: false, computedAt: 'x' };
     expect(isBlastResult({ ...base, sinceLastCommit: 'oops' })).toBe(false);
     expect(isBlastResult({ ...base, sinceLastCommit: 42 })).toBe(false);
+  });
+});
+
+describe('normalizeAppReview (D1)', () => {
+  const OFF = { active: false, summary: false, inlineFindings: false };
+
+  it('defaults to all-false (App owns nothing) for absent / null / non-object', () => {
+    expect(normalizeAppReview(undefined)).toEqual(OFF);
+    expect(normalizeAppReview(null)).toEqual(OFF);
+    expect(normalizeAppReview('true')).toEqual(OFF);
+    expect(normalizeAppReview(42)).toEqual(OFF);
+    expect(normalizeAppReview([])).toEqual(OFF);
+    expect(normalizeAppReview({})).toEqual(OFF);
+  });
+
+  it('accepts each surface ONLY on an explicit boolean true', () => {
+    expect(normalizeAppReview({ active: true, summary: true, inlineFindings: false })).toEqual({
+      active: true,
+      summary: true,
+      inlineFindings: false,
+    });
+    expect(normalizeAppReview({ active: true, summary: false, inlineFindings: true })).toEqual({
+      active: true,
+      summary: false,
+      inlineFindings: true,
+    });
+  });
+
+  it('treats truthy NON-boolean values as false (fails safe → Action keeps posting)', () => {
+    // A string 'true', 1, or {} must NOT silently cede a surface.
+    expect(normalizeAppReview({ active: 'true', summary: 1, inlineFindings: {} })).toEqual(OFF);
+  });
+
+  it('normalizeBlastResult always fills appReview with the all-false default when absent', () => {
+    const r = normalizeBlastResult({
+      blastLevel: 'LOW',
+      truncated: false,
+      computedAt: '2026-01-01T00:00:00Z',
+    } as unknown as BlastResult);
+    expect(r.appReview).toEqual(OFF);
   });
 });
 
