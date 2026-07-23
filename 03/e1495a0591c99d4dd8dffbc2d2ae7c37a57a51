@@ -1,0 +1,12 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.15",
+  "base_commit_sha": "03e1495a0591c99d4dd8dffbc2d2ae7c37a57a51",
+  "prompts": {},
+  "humans": {
+    "h_1bd610b620f0d7": {
+      "author": "Abhinav Pandey <abhinavpandey1230@gmail.com>"
+    }
+  }
+}
