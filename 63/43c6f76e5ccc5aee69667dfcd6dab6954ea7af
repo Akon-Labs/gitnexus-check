@@ -1,0 +1,49 @@
+test/main.test.ts
+  s_b3fb8faa15e34b::t_14485526e3401d 202,216,219,229-230,232-236,243,267,273
+src/types/blast-result.ts
+  s_b3fb8faa15e34b::t_187802b278d84b 286-297
+  s_b3fb8faa15e34b::t_1124a5578a08ae 741-742,746-775
+  s_b3fb8faa15e34b::t_69ddc6a01d759d 776-777
+src/render-comment.ts
+  s_b3fb8faa15e34b::t_58a928ec528086 623,626-632,640,642-652,654-659,666-668,679,683-685,687,690,692,694
+test/slm-format.test.ts
+  s_b3fb8faa15e34b::t_81c04be7b9ba65 123,130,144,147,149,155,160-161
+  s_b3fb8faa15e34b::t_621950be4d3d9c 101-117
+src/main.ts
+  s_b3fb8faa15e34b::t_fe03042798334f 131-139
+test/render-comment.test.ts
+  s_b3fb8faa15e34b::t_b239c60dbcd74b 306-308,313,315-316,342,379,520,648,866
+src/render-findings.ts
+  s_b3fb8faa15e34b::t_5a3d263ad82721 14-18
+  s_b3fb8faa15e34b::t_a7e44033ce76da 65-71,89-111
+  s_b3fb8faa15e34b::t_bbd716330cdaec 113,179-195
+  s_b3fb8faa15e34b::t_36cb073de1624f 112
+  s_b3fb8faa15e34b::t_a4f48296031441 114
+test/render-findings.test.ts
+  s_b3fb8faa15e34b::t_eba1e379a3c4fb 87,96-136
+  s_b3fb8faa15e34b::t_3fa590fc69c518 137
+test/blast-result.test.ts
+  s_b3fb8faa15e34b::t_06890836aae2f9 511-547
+dist/index.js
+  s_b3fb8faa15e34b::t_a29ca4d310b2df 34916-34924,36382,36385-36391,36399,36401-36413,36420,36432,36435-36437,36439,36442,36444,36446,36781-36785,36828-36834,36850-36874,36934-36949,37040-37048,37052,37062-37064,37068-37069,37073-37074,37118-37124,37127-37134,37554-37556,37559-37592
+  s_b3fb8faa15e34b::t_2d07d1b1436ab8 37593
+src/slm-format.ts
+  s_b3fb8faa15e34b::t_e8a26eb37b0b16 19-27,31,42-43,48-49,53,55
+  s_b3fb8faa15e34b::t_d06fb5eb93ed2c 105-111,114-121
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.16",
+  "base_commit_sha": "6343c6f76e5ccc5aee69667dfcd6dab6954ea7af",
+  "prompts": {},
+  "sessions": {
+    "s_b3fb8faa15e34b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a0652d86-8724-480b-abcf-b7d79c011b99",
+        "model": "claude-fable-5"
+      },
+      "human_author": "Abhinav Pandey <abhinavpandey1230@gmail.com>"
+    }
+  }
+}
