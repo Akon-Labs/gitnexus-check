@@ -199,7 +199,7 @@ describe('main — happy path', () => {
     expect(body).toContain('🟢 LOW — nothing scary here.');
   });
 
-  it('posts the deterministic body unchanged when aiSummary is absent', async () => {
+  it('collapses detail into the Full report expander (no digest lead) when aiSummary is absent', async () => {
     resolveSpy.mockResolvedValue('repo-uuid');
     refreshSpy.mockResolvedValue(undefined);
     const blastRaw = loadFullBlast();
@@ -213,10 +213,10 @@ describe('main — happy path', () => {
 
     const body = (postSpy.mock.calls[0][0] as { body: string }).body;
     expect(body).not.toContain('## Summary');
-    expect(body).not.toContain('📋 Full report');
+    expect(body).toContain('📋 Full report');
   });
 
-  it('posts the raw rendered body (compose not invoked) when neither aiSummary nor sinceLastCommit is present', async () => {
+  it('posts the composed body (empty digest) when neither aiSummary nor sinceLastCommit is present', async () => {
     resolveSpy.mockResolvedValue('repo-uuid');
     refreshSpy.mockResolvedValue(undefined);
     const blastRaw = loadFullBlast();
@@ -226,16 +226,21 @@ describe('main — happy path', () => {
     getBlastSpy.mockResolvedValue(blast);
     postSpy.mockResolvedValue({ commentId: 1, action: 'created' });
 
-    // Compute the raw rendered comment the same way main does, to assert equality.
+    // Compute the composed comment the same way main does, to assert equality:
+    // compose ALWAYS runs now (always-collapse), with an empty digest here.
     const { renderComment } = await import('../src/render-comment');
-    const expected = renderComment(blast, { prNumber: 152, hubUrl: 'https://hub.example.com' });
+    const { composeWithDigest } = await import('../src/slm-format');
+    const expected = composeWithDigest(
+      renderComment(blast, { prNumber: 152, hubUrl: 'https://hub.example.com' }),
+      '',
+    );
 
     const { main } = await import('../src/main');
     await main();
 
     const body = (postSpy.mock.calls[0][0] as { body: string }).body;
     expect(body).toBe(expected);
-    expect(body).not.toContain('## Commit `');
+    expect(body).not.toContain("What's new in this push");
   });
 
   it('posts a SEPARATE per-SHA comment for the since-last-commit delta; main comment carries no delta', async () => {
@@ -259,13 +264,13 @@ describe('main — happy path', () => {
 
     const mainCall = postSpy.mock.calls[0][0] as { marker: string; body: string };
     expect(mainCall.marker).toBe('<!-- gitnexus-review-v1 -->');
-    expect(mainCall.body).not.toContain('## Commit `');
+    expect(mainCall.body).not.toContain("What's new in this push");
     expect(mainCall.body).not.toContain('gitnexus-since-commit');
 
     const sinceCall = postSpy.mock.calls[1][0] as { marker: string; body: string };
     expect(sinceCall.marker).toBe(sinceCommitMarker(headSha));
     expect(sinceCall.body).toContain(sinceCommitMarker(headSha));
-    expect(sinceCall.body).toContain('## Commit `a1b2c3d` summary');
+    expect(sinceCall.body).toContain("### 🔄 What's new in this push (`a1b2c3d`)");
     expect(sinceCall.body).toContain('reworked the parser');
 
     // comment-id output stays the MAIN comment id.

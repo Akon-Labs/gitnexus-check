@@ -620,41 +620,52 @@ function oldestStaleDate(groups: CrossRepoGroup[]): string | null {
 }
 
 /**
- * @brief: The Verdict - a deterministic single-line ruling for the
+ * @brief: The Verdict - a deterministic plain-language ruling for the
  *         blockquote at the top, derived solely from already-validated
  *         numeric/enum fields (never untrusted PR title/branch strings).
- *         Combines the blast-level ruling, total dependent count, module
- *         count, a flow addendum when flows are present, a level-based
- *         rationale clause for MEDIUM/HIGH/CRITICAL (LOW emits none), and
- *         the stale marker. Returns '' when there is nothing to summarise
- *         so the renderer can suppress the blockquote.
+ *         A reach sentence (downstream symbols / modules / flows), a
+ *         what-to-do clause for MEDIUM/HIGH/CRITICAL (LOW emits none), a
+ *         cross-repo sentence, and the stale/cross-repo caveats. It renders
+ *         even when the LLM digest failed, so it must read like a sentence a
+ *         reviewer wants, not a stats dump. Keep the copy byte-identical to
+ *         the Hub's comment-renderer.ts buildHeadline (which drops the flows
+ *         fragment and stale marker, absent from its row shape).
  *
  * @params: (blast: BlastResult) -> Normalised Hub result.
  *
  * @returns: string - the one-line verdict, or '' when empty.
  */
 function buildHeadline(blast: BlastResult): string {
-  const bits: string[] = [];
-  bits.push(`Blast level: \`${blast.blastLevel}\``);
   const total = blast.d1Symbols.length + blast.d2Symbols.length + blast.d3Symbols.length;
-  if (total > 0) bits.push(`${total} dependent symbol${total === 1 ? '' : 's'}`);
-  if (blast.affectedModules.length > 0) {
-    const m = blast.affectedModules.length;
-    bits.push(`${m} module${m === 1 ? '' : 's'} touched`);
-  }
+  const modules = blast.affectedModules.length;
   const flows = blast.affectedFlows.length;
-  if (flows > 0) bits.push(`${flows} flow${flows === 1 ? '' : 's'} affected`);
-  const rationale = levelRationale(blast.blastLevel);
-  if (rationale) bits.push(rationale);
+  let reach =
+    total > 0 && modules > 0
+      ? `this change reaches ${total} downstream symbol${total === 1 ? '' : 's'} across ${modules} module${modules === 1 ? '' : 's'}`
+      : total > 0
+        ? `this change reaches ${total} downstream symbol${total === 1 ? '' : 's'}`
+        : modules > 0
+          ? `this change touches ${modules} module${modules === 1 ? '' : 's'}`
+          : 'no downstream dependents were found in the code graph';
+  if (flows > 0 && (total > 0 || modules > 0)) {
+    reach += ` and ${flows} execution flow${flows === 1 ? '' : 's'}`;
+  }
 
-  // Cross-repo verdict clause: "affects N other repos (a, b, c +K more)".
+  const bits: string[] = [];
+  bits.push(
+    `**${blast.blastLevel} blast radius** — ${reach}${guidanceClause(blast.blastLevel)}.`,
+  );
+
+  // Cross-repo sentence: "It also reaches N other repos (a, b, c +K more)."
   const cr = blast.crossRepo;
   if (cr && cr.findings.length > 0) {
     const repos = distinctConsumerRepos(cr.findings);
     if (repos.length > 0) {
       const head = repos.slice(0, 3).map(escapeCell).join(', ');
       const extra = repos.length > 3 ? ` +${repos.length - 3} more` : '';
-      bits.push(`affects ${repos.length} other repo${repos.length === 1 ? '' : 's'} (${head}${extra})`);
+      bits.push(
+        `It also reaches ${repos.length} other repo${repos.length === 1 ? '' : 's'} (${head}${extra}).`,
+      );
     }
   }
 
@@ -665,22 +676,22 @@ function buildHeadline(blast: BlastResult): string {
   } else if (cr && cr.groups.some((g) => g.stale)) {
     bits.push('_(cross-repo data may be stale)_');
   }
-  return bits.join(' · ');
+  return bits.join(' ');
 }
 
 /**
- * @brief: Short parenthetical rationale for the verdict, keyed off the
- *         blast level. LOW returns '' (no clause); MEDIUM/HIGH/CRITICAL
- *         return a fixed `_(...)_` reason.
+ * @brief: What-to-do clause for the verdict sentence, keyed off the blast
+ *         level (Hub guidanceClause parity). LOW returns '' (no clause);
+ *         a low-reach change needs no instruction.
  */
-function levelRationale(level: BlastLevel): string {
+function guidanceClause(level: BlastLevel): string {
   switch (level) {
     case 'CRITICAL':
-      return '_(critical surface, review carefully before merge)_';
+      return '; this lands on a critical surface, so review the dependents carefully before merging';
     case 'HIGH':
-      return '_(high reach, verify dependents)_';
+      return '; review the dependent list before merging';
     case 'MEDIUM':
-      return '_(moderate reach, spot-check dependents)_';
+      return '; a spot-check of the dependents should cover it';
     default:
       return '';
   }

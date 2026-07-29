@@ -283,6 +283,18 @@ export interface FindingItem {
   enclosingSymbol?: string;
   callers?: Array<{ filePath: string; startLine?: number }>;
   category?: string;
+  /**
+   * Hub-validated fix (additive; absent on older Hubs). safe:true renders as
+   * a committable ```suggestion fence when the anchor is single-line;
+   * safe:false renders as a plain block + caveat naming blockedBy callers.
+   * REVALIDATED client-side by normalizeSuggestion — a committable artifact
+   * is never trusted straight off the wire.
+   */
+  suggestion?: {
+    code: string;
+    safe: boolean;
+    blockedBy?: Array<{ filePath: string; startLine?: number }>;
+  };
 }
 
 /**
@@ -726,7 +738,41 @@ function normalizeFindingItem(v: unknown): FindingItem | null {
   const callers = normalizeCallers(v.callers);
   if (callers.length > 0) item.callers = callers;
   if (typeof v.category === 'string' && v.category.length > 0) item.category = v.category;
+  const suggestion = normalizeSuggestion(v.suggestion);
+  if (suggestion) item.suggestion = suggestion;
   return item;
+}
+
+/** Suggestion size caps — keep identical to the Hub's suggestion-gate.ts. */
+const MAX_SUGGESTION_LINES = 15;
+const MAX_SUGGESTION_CHARS = 1_500;
+
+/**
+ * Client-side revalidation of a Hub suggestion — mandatory for a committable
+ * artifact (render-findings.ts splices `code` inside a fence VERBATIM, past
+ * neutralizeMarkup). Mirrors the Hub gate's content rules: string, LF-only,
+ * size caps, no line able to open/close a fence, no HTML-comment delimiters
+ * (the reconcile marker regexes scan the RAW body), no NUL. A malformed value
+ * drops the FIELD, never the finding. `safe` must be literally true to stay
+ * committable; anything else renders as the plain-block variant.
+ */
+function normalizeSuggestion(v: unknown): FindingItem['suggestion'] | undefined {
+  if (!isObject(v)) return undefined;
+  const { code, safe } = v;
+  if (typeof code !== 'string' || code.trim().length === 0) return undefined;
+  if (code.length > MAX_SUGGESTION_CHARS || code.includes('\r') || code.includes('\u0000')) {
+    return undefined;
+  }
+  const lines = code.split('\n');
+  if (lines.length > MAX_SUGGESTION_LINES) return undefined;
+  if (lines.some((l) => /^\s*(`{3,}|~{3,})/.test(l))) return undefined;
+  if (code.includes('<!--') || code.includes('-->')) return undefined;
+  const blockedBy = normalizeCallers(v.blockedBy);
+  return {
+    code,
+    safe: safe === true,
+    ...(blockedBy.length > 0 ? { blockedBy } : {}),
+  };
 }
 
 /**

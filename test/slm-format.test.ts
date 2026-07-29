@@ -98,19 +98,36 @@ describe('composeWithDigest', () => {
     // Exact label: only the symbols segment, no files/flows segments appended.
     expect(out).toContain('<summary><b>📋 Full report — 3 symbols</b></summary>');
   });
+
+  // The always-collapse rule: a missing/failed digest must never dump the
+  // detail tables above the fold — head → divider → ONE collapsed expander.
+  it('collapses the detail into the Full report expander even with an empty digest', () => {
+    const out = composeWithDigest(rawComment(), '');
+    expect(out.startsWith(MARKER)).toBe(true);
+    expect(out).not.toContain('## Summary');
+    expect(out).toContain('<summary><b>📋 Full report — 162 symbols · 117 files · 58 flows</b></summary>');
+    // Verdict + metrics strip stay above the divider; detail sits inside the expander.
+    expect(out.indexOf('| Blast Level')).toBeLessThan(out.indexOf('\n---\n'));
+    expect(out.indexOf('## What changed')).toBeGreaterThan(out.indexOf('📋 Full report'));
+  });
+
+  it('returns an empty-blast comment unchanged when the digest is empty too', () => {
+    const empty = `${MARKER}\n\n### GitNexus Review · PR #7\n\nNo impact detected.`;
+    expect(composeWithDigest(empty, '')).toBe(empty);
+  });
 });
 
 describe('composeWithDigest — main comment carries NO since-last-commit delta', () => {
   it('the digest-spliced main comment never contains the delta block', () => {
     const out = composeWithDigest(rawComment(), DIGEST);
-    expect(out).not.toContain('## Commit `');
+    expect(out).not.toContain("What's new in this push");
     expect(out).not.toContain('gitnexus-since-commit');
   });
 
   it('the empty-blast main comment never contains the delta block', () => {
     const empty = `${MARKER}\n\n### GitNexus Review · PR #7\n\nNo impact detected.`;
     const out = composeWithDigest(empty, DIGEST);
-    expect(out).not.toContain('## Commit `');
+    expect(out).not.toContain("What's new in this push");
   });
 });
 
@@ -124,23 +141,24 @@ describe('renderSinceCommitComment — standalone per-commit comment', () => {
     expect(out.split('\n')[0]).toBe(sinceCommitMarker(SHA40));
   });
 
-  it('contains the delta block (short sha header) and the verbatim summary', () => {
+  it('contains the delta block (short sha header), the verbatim summary, and the pointer footer', () => {
     const out = renderSinceCommitComment(DELTA);
     // shortSha truncation: 40-char sha → 7-char in the visible header.
-    expect(out).toContain('## Commit `a1b2c3d` summary');
+    expect(out).toContain("### 🔄 What's new in this push (`a1b2c3d`)");
     expect(out).toContain('🔁 Fixed the null guard in `parse()`.');
+    expect(out).toContain('_The main GitNexus review comment has the full, updated report._');
   });
 
   it('the marker (full sha) appears before the visible short-sha header', () => {
     const out = renderSinceCommitComment(DELTA);
     expect(out.indexOf(sinceCommitMarker(SHA40))).toBeLessThan(
-      out.indexOf('## Commit `'),
+      out.indexOf("### 🔄 What's new in this push"),
     );
   });
 
   it('shortSha truncates a 40-char sha to 7 and passes a short string through', () => {
-    expect(renderSinceCommitComment({ headSha: SHA40, summary: 's' })).toContain('`a1b2c3d` summary');
-    expect(renderSinceCommitComment({ headSha: 'abc12', summary: 's' })).toContain('`abc12` summary');
+    expect(renderSinceCommitComment({ headSha: SHA40, summary: 's' })).toContain('this push (`a1b2c3d`)');
+    expect(renderSinceCommitComment({ headSha: 'abc12', summary: 's' })).toContain('this push (`abc12`)');
   });
 });
 

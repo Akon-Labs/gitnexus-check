@@ -128,15 +128,15 @@ export async function main(): Promise<void> {
 
   const rawBody = renderComment(blast, { prNumber, hubUrl });
 
-  // ── 6b. If the Hub produced an LLM summary digest (it holds the Azure key
-  //        and rate-limits the call), splice it into the upsert-by-marker MAIN
-  //        comment and collapse detail beneath it. When no digest is present,
-  //        composeWithDigest is not called and the body is byte-identical to the
-  //        deterministic comment. The since-last-commit delta is NOT part of the
-  //        main comment — it is posted separately below. The Action makes no LLM
-  //        call of its own.
-  const hasDigest = typeof blast.aiSummary === 'string' && blast.aiSummary.trim().length > 0;
-  const body = hasDigest ? composeWithDigest(rawBody, blast.aiSummary ?? '') : rawBody;
+  // ── 6b. Compose the MAIN comment: the detail sections always collapse into
+  //        ONE "Full report" expander, and when the Hub produced an LLM summary
+  //        digest (it holds the Azure key and rate-limits the call) it splices
+  //        in as the default-visible lead. A missing/failed digest must never
+  //        dump every table above the fold — the plain-language verdict + strip
+  //        carry the lead instead. The since-last-commit delta is NOT part of
+  //        the main comment — it is posted separately below. The Action makes
+  //        no LLM call of its own.
+  const body = composeWithDigest(rawBody, blast.aiSummary ?? '');
 
   // ── D1 App-primary gate: when the native GitNexus App bot owns a review surface
   //    for this repo, the Action cedes exactly that surface so the two never

@@ -508,6 +508,43 @@ describe('normalizeFindings — Wave-2 inline findings envelope', () => {
     expect(out?.items[0]).toEqual(validItem);
   });
 
+  describe('normalizeSuggestion — client-side revalidation of a committable artifact', () => {
+    const withSuggestion = (suggestion: unknown) =>
+      normalizeFindings({ schemaVersion: '1', items: [{ ...validItem, suggestion }] })?.items[0];
+
+    it('accepts a valid suggestion and keeps safe:true only when literally true', () => {
+      const ok = withSuggestion({ code: 'const x = 1;', safe: true });
+      expect(ok?.suggestion).toEqual({ code: 'const x = 1;', safe: true });
+      const coerced = withSuggestion({ code: 'const x = 1;', safe: 'true' });
+      expect(coerced?.suggestion?.safe).toBe(false);
+    });
+
+    it('normalizes blockedBy through the caller validator', () => {
+      const out = withSuggestion({
+        code: 'const x = 1;',
+        safe: false,
+        blockedBy: [{ filePath: 'src/a.ts', startLine: 3 }, { filePath: '' }, 'junk'],
+      });
+      expect(out?.suggestion?.blockedBy).toEqual([{ filePath: 'src/a.ts', startLine: 3 }]);
+    });
+
+    it.each([
+      ['non-string code', { code: 42, safe: true }],
+      ['empty code', { code: '   ', safe: true }],
+      ['CR line endings', { code: 'a\r\nb', safe: true }],
+      ['fence-opening line', { code: 'ok();\n``` evil', safe: true }],
+      ['tilde fence line', { code: '~~~\nx', safe: true }],
+      ['HTML comment open', { code: 'x <!-- marker', safe: true }],
+      ['HTML comment close', { code: 'x --> y', safe: true }],
+      ['over 15 lines', { code: Array.from({ length: 16 }, (_, i) => `l${i}`).join('\n'), safe: true }],
+      ['not an object', 'const x = 1;'],
+    ])('drops the FIELD (never the finding) for %s', (_label, suggestion) => {
+      const out = withSuggestion(suggestion);
+      expect(out).toBeDefined(); // the finding itself survives
+      expect(out?.suggestion).toBeUndefined();
+    });
+  });
+
   it('degrades an unknown schemaVersion to the error envelope (post nothing inline)', () => {
     const out = normalizeFindings({
       schemaVersion: '2',
