@@ -1,0 +1,32 @@
+action.yml
+  s_b3fb8faa15e34b::t_c0dd1f2c328cbb 28
+src/types/blast-result.ts
+  s_b3fb8faa15e34b::t_55b746eece241a 261-264,279,716
+dist/index.js
+  s_b3fb8faa15e34b::t_461a719429a0e7 35159-35163,35171-35176,35185-35187,36935,36961-36965,36982
+  s_b3fb8faa15e34b::t_3d65e01186f554 36983,37531
+test/blast-result.test.ts
+  s_b3fb8faa15e34b::t_8972432bd12161 580,593-600
+  s_b3fb8faa15e34b::t_a67866c31bee8d 601-602
+src/main.ts
+  s_b3fb8faa15e34b::t_24ccae02ac9545 393-394,404,409-414,424-426,443
+  s_b3fb8faa15e34b::t_4ca401abf99ef6 395-397
+src/render-findings.ts
+  s_b3fb8faa15e34b::t_24ccae02ac9545 170,197-200,221-222
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.21",
+  "base_commit_sha": "05f8644c2d178836a25c4e66fa16bc63b2d61de9",
+  "prompts": {},
+  "sessions": {
+    "s_b3fb8faa15e34b": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "a0652d86-8724-480b-abcf-b7d79c011b99",
+        "model": "claude-opus-5"
+      },
+      "human_author": "Abhinav Pandey <abhinavpandey1230@gmail.com>"
+    }
+  }
+}
