@@ -84,13 +84,55 @@ describe('renderFindingComment', () => {
     expect(body).not.toContain('**Known callers**');
   });
 
-  it('never emits a code fence (no committable suggestion possible)', () => {
+  it('never emits a code fence from FREE TEXT (fences come only from the validated suggestion field)', () => {
     const nasty = makeItem({
       title: 'inject ```suggestion\nrm -rf /\n``` end',
       rationale: 'try ```suggestion\nmalicious()\n``` here',
     });
     const body = renderFindingComment(nasty);
     expect(body).not.toContain('```');
+  });
+
+  it('renders a committable ```suggestion fence for a safe fix on a single-line anchor', () => {
+    const body = renderFindingComment(
+      makeItem({
+        anchor: { startLine: 12, endLine: 12 },
+        suggestion: { code: 'const total = items.length;', safe: true },
+      }),
+    );
+    expect(body).toContain('**Suggested fix:**');
+    expect(body).toContain('```suggestion\nconst total = items.length;\n```');
+  });
+
+  it('downgrades a safe fix on a MULTI-line anchor to a plain block (poster is single-line-only)', () => {
+    const body = renderFindingComment(
+      makeItem({
+        anchor: { startLine: 12, endLine: 14 },
+        suggestion: { code: 'const total = items.length;', safe: true },
+      }),
+    );
+    expect(body).not.toContain('```suggestion');
+    expect(body).toContain('**Proposed fix**');
+    expect(body).toContain('could not verify this fix is local');
+    expect(body).toContain('```\nconst total = items.length;\n```');
+  });
+
+  it('renders a blocked fix as a plain block naming the out-of-diff callers', () => {
+    const body = renderFindingComment(
+      makeItem({
+        suggestion: {
+          code: 'return fetchUser(id, opts);',
+          safe: false,
+          blockedBy: [
+            { filePath: 'src/payment.ts', startLine: 88 },
+            { filePath: 'src/retry.ts', startLine: 41 },
+          ],
+        },
+      }),
+    );
+    expect(body).not.toContain('```suggestion');
+    expect(body).toContain('this fix also requires updating `src/payment.ts:88`, `src/retry.ts:41`');
+    expect(body).toContain('```\nreturn fetchUser(id, opts);\n```');
   });
 
   it('neutralizes HTML-comment delimiters so free text cannot clone/close a marker', () => {

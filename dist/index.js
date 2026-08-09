@@ -34913,15 +34913,15 @@ async function main() {
         return fail(err, 'hub', 'getBlast');
     }
     const rawBody = (0, render_comment_1.renderComment)(blast, { prNumber, hubUrl });
-    // ── 6b. If the Hub produced an LLM summary digest (it holds the Azure key
-    //        and rate-limits the call), splice it into the upsert-by-marker MAIN
-    //        comment and collapse detail beneath it. When no digest is present,
-    //        composeWithDigest is not called and the body is byte-identical to the
-    //        deterministic comment. The since-last-commit delta is NOT part of the
-    //        main comment — it is posted separately below. The Action makes no LLM
-    //        call of its own.
-    const hasDigest = typeof blast.aiSummary === 'string' && blast.aiSummary.trim().length > 0;
-    const body = hasDigest ? (0, slm_format_1.composeWithDigest)(rawBody, blast.aiSummary ?? '') : rawBody;
+    // ── 6b. Compose the MAIN comment: the detail sections always collapse into
+    //        ONE "Full report" expander, and when the Hub produced an LLM summary
+    //        digest (it holds the Azure key and rate-limits the call) it splices
+    //        in as the default-visible lead. A missing/failed digest must never
+    //        dump every table above the fold — the plain-language verdict + strip
+    //        carry the lead instead. The since-last-commit delta is NOT part of
+    //        the main comment — it is posted separately below. The Action makes
+    //        no LLM call of its own.
+    const body = (0, slm_format_1.composeWithDigest)(rawBody, blast.aiSummary ?? '');
     // ── D1 App-primary gate: when the native GitNexus App bot owns a review surface
     //    for this repo, the Action cedes exactly that surface so the two never
     //    double-post. Per-surface (summary comment + since-last-commit vs inline
@@ -36379,43 +36379,45 @@ function oldestStaleDate(groups) {
     return dates.length > 0 ? dates[0].slice(0, 10) : null;
 }
 /**
- * @brief: The Verdict - a deterministic single-line ruling for the
+ * @brief: The Verdict - a deterministic plain-language ruling for the
  *         blockquote at the top, derived solely from already-validated
  *         numeric/enum fields (never untrusted PR title/branch strings).
- *         Combines the blast-level ruling, total dependent count, module
- *         count, a flow addendum when flows are present, a level-based
- *         rationale clause for MEDIUM/HIGH/CRITICAL (LOW emits none), and
- *         the stale marker. Returns '' when there is nothing to summarise
- *         so the renderer can suppress the blockquote.
+ *         A reach sentence (downstream symbols / modules / flows), a
+ *         what-to-do clause for MEDIUM/HIGH/CRITICAL (LOW emits none), a
+ *         cross-repo sentence, and the stale/cross-repo caveats. It renders
+ *         even when the LLM digest failed, so it must read like a sentence a
+ *         reviewer wants, not a stats dump. Keep the copy byte-identical to
+ *         the Hub's comment-renderer.ts buildHeadline (which drops the flows
+ *         fragment and stale marker, absent from its row shape).
  *
  * @params: (blast: BlastResult) -> Normalised Hub result.
  *
  * @returns: string - the one-line verdict, or '' when empty.
  */
 function buildHeadline(blast) {
-    const bits = [];
-    bits.push(`Blast level: \`${blast.blastLevel}\``);
     const total = blast.d1Symbols.length + blast.d2Symbols.length + blast.d3Symbols.length;
-    if (total > 0)
-        bits.push(`${total} dependent symbol${total === 1 ? '' : 's'}`);
-    if (blast.affectedModules.length > 0) {
-        const m = blast.affectedModules.length;
-        bits.push(`${m} module${m === 1 ? '' : 's'} touched`);
-    }
+    const modules = blast.affectedModules.length;
     const flows = blast.affectedFlows.length;
-    if (flows > 0)
-        bits.push(`${flows} flow${flows === 1 ? '' : 's'} affected`);
-    const rationale = levelRationale(blast.blastLevel);
-    if (rationale)
-        bits.push(rationale);
-    // Cross-repo verdict clause: "affects N other repos (a, b, c +K more)".
+    let reach = total > 0 && modules > 0
+        ? `this change reaches ${total} downstream symbol${total === 1 ? '' : 's'} across ${modules} module${modules === 1 ? '' : 's'}`
+        : total > 0
+            ? `this change reaches ${total} downstream symbol${total === 1 ? '' : 's'}`
+            : modules > 0
+                ? `this change touches ${modules} module${modules === 1 ? '' : 's'}`
+                : 'no downstream dependents were found in the code graph';
+    if (flows > 0 && (total > 0 || modules > 0)) {
+        reach += ` and ${flows} execution flow${flows === 1 ? '' : 's'}`;
+    }
+    const bits = [];
+    bits.push(`**${blast.blastLevel} blast radius** — ${reach}${guidanceClause(blast.blastLevel)}.`);
+    // Cross-repo sentence: "It also reaches N other repos (a, b, c +K more)."
     const cr = blast.crossRepo;
     if (cr && cr.findings.length > 0) {
         const repos = distinctConsumerRepos(cr.findings);
         if (repos.length > 0) {
             const head = repos.slice(0, 3).map(escapeCell).join(', ');
             const extra = repos.length > 3 ? ` +${repos.length - 3} more` : '';
-            bits.push(`affects ${repos.length} other repo${repos.length === 1 ? '' : 's'} (${head}${extra})`);
+            bits.push(`It also reaches ${repos.length} other repo${repos.length === 1 ? '' : 's'} (${head}${extra}).`);
         }
     }
     if (blast.stale)
@@ -36427,21 +36429,21 @@ function buildHeadline(blast) {
     else if (cr && cr.groups.some((g) => g.stale)) {
         bits.push('_(cross-repo data may be stale)_');
     }
-    return bits.join(' · ');
+    return bits.join(' ');
 }
 /**
- * @brief: Short parenthetical rationale for the verdict, keyed off the
- *         blast level. LOW returns '' (no clause); MEDIUM/HIGH/CRITICAL
- *         return a fixed `_(...)_` reason.
+ * @brief: What-to-do clause for the verdict sentence, keyed off the blast
+ *         level (Hub guidanceClause parity). LOW returns '' (no clause);
+ *         a low-reach change needs no instruction.
  */
-function levelRationale(level) {
+function guidanceClause(level) {
     switch (level) {
         case 'CRITICAL':
-            return '_(critical surface, review carefully before merge)_';
+            return '; this lands on a critical surface, so review the dependents carefully before merging';
         case 'HIGH':
-            return '_(high reach, verify dependents)_';
+            return '; review the dependent list before merging';
         case 'MEDIUM':
-            return '_(moderate reach, spot-check dependents)_';
+            return '; a spot-check of the dependents should cover it';
         default:
             return '';
     }
@@ -36776,8 +36778,11 @@ function escapeCell(value) {
  *         gates). The Action is defence-in-depth — it additionally escapes
  *         anything it interpolates into markdown *structure* (HTML-comment
  *         delimiters that could clone/close our markers, `@`-mentions that could
- *         ping, and — critically — triple-backtick runs) and NEVER renders a
- *         committable suggestion fence in Wave 2.
+ *         ping, and — critically — triple-backtick runs). No fence is ever
+ *         produced from FREE TEXT; a committable ```suggestion fence renders
+ *         ONLY from the Hub-gated, client-REVALIDATED `suggestion` field
+ *         (normalizeSuggestion in types/blast-result.ts), and only when the
+ *         Hub marked it safe AND the anchor is single-line.
  */
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.findingMarker = findingMarker;
@@ -36820,10 +36825,13 @@ function findingFingerprintFromBody(body) {
 }
 /**
  * @brief: Render one finding as a PR review-comment body: the hidden fingerprint
- *         marker, a severity badge + title, the rationale prose, an optional
- *         known-callers list (deterministic findings only, capped), and a
- *         one-line "why this matters" footer naming GitNexus. Never emits a code
- *         fence, so no committable suggestion can be produced in Wave 2.
+ *         marker, a severity badge + title, the rationale prose, the Hub's
+ *         validated suggestion block when present (committable ```suggestion
+ *         fence for safe single-line-anchored fixes; plain block + caveat
+ *         otherwise), an optional known-callers list (deterministic findings
+ *         only, capped), and a one-line "why this matters" footer naming
+ *         GitNexus. Free text can never produce a fence — only the
+ *         normalizeSuggestion-revalidated field reaches one.
  *
  * @params: (item: FindingItem) -> A normalised finding (post-normalizeFindings).
  * @returns: string — the review-comment markdown body.
@@ -36837,6 +36845,31 @@ function renderFindingComment(item) {
     const rationale = sanitizeProse(item.rationale);
     if (rationale.length > 0) {
         lines.push(rationale);
+        lines.push('');
+    }
+    if (item.suggestion) {
+        // GitHub replaces the whole commented line range with a suggestion body,
+        // and the poster is single-line-only — so committable requires the Hub's
+        // safe verdict AND a single-line anchor; everything else shows the code
+        // as a plain (non-committable) block with the reason.
+        const committable = item.suggestion.safe === true &&
+            item.anchored &&
+            item.anchor != null &&
+            item.anchor.startLine === item.anchor.endLine;
+        if (committable) {
+            lines.push('**Suggested fix:**');
+            lines.push('');
+            lines.push('```suggestion');
+            lines.push(item.suggestion.code);
+            lines.push('```');
+        }
+        else {
+            lines.push(`**Proposed fix** (${suggestionCaveat(item.suggestion)}):`);
+            lines.push('');
+            lines.push('```');
+            lines.push(item.suggestion.code);
+            lines.push('```');
+        }
         lines.push('');
     }
     // Deterministic findings can prove who calls the changed symbol — list the
@@ -36897,6 +36930,22 @@ function renderFallbackItem(item) {
     const rationale = truncate(escapeInline(item.rationale), FALLBACK_RATIONALE_CHARS);
     const tail = rationale.length > 0 ? ` — ${rationale}` : '';
     return `${badge} **${escapeInline(item.title)}** — \`${loc}\`${tail}`;
+}
+/**
+ * Caveat clause for a non-committable fix: name the out-of-diff callers the
+ * Hub proved would also need updating (the graph moat sentence), or the
+ * generic "could not verify" copy. Keep byte-identical to the Hub renderer
+ * (gitnexus-hub checks/render-finding-comment.ts downgradeCaveat).
+ */
+function suggestionCaveat(suggestion) {
+    if (suggestion.blockedBy && suggestion.blockedBy.length > 0) {
+        const named = suggestion.blockedBy
+            .slice(0, MAX_CALLERS)
+            .map((c) => `\`${callerLoc(c)}\``)
+            .join(', ');
+        return `not committable — this fix also requires updating ${named}`;
+    }
+    return 'not committable — GitNexus could not verify this fix is local; review call sites before applying';
 }
 /** Severity → emoji + bold label for the finding badge. */
 function severityBadge(severity) {
@@ -36988,18 +37037,19 @@ exports.composeWithDigest = composeWithDigest;
 exports.sinceCommitMarker = sinceCommitMarker;
 exports.renderSinceCommitComment = renderSinceCommitComment;
 /**
- * @brief: Splice the Hub's summary digest into the deterministic comment and
- *         collapse the heavy detail beneath it. The default-visible comment
- *         becomes just the header, one-line verdict, metrics strip, and the
- *         readable `## Summary` digest — so a 160-symbol / 100-file PR no longer
- *         floods the thread. Every detail table is kept verbatim from the
- *         renderer but tucked inside ONE collapsed `<details>` expander, one
- *         click away. Falls back to appending the digest if there is no detail
- *         body (empty-blast comment). This produces the MAIN comment only — it
+ * @brief: Splice the Hub's summary digest (when present) into the
+ *         deterministic comment and collapse the heavy detail beneath it —
+ *         digest or not. The default-visible comment becomes just the header,
+ *         plain-language verdict, metrics strip, and (when the LLM produced
+ *         one) the readable `## Summary` digest — so a 160-symbol / 100-file
+ *         PR no longer floods the thread, and a FAILED digest no longer dumps
+ *         every table above the fold. Every detail table is kept verbatim
+ *         from the renderer but tucked inside ONE collapsed `<details>`
+ *         expander, one click away. This produces the MAIN comment only — it
  *         carries no since-last-commit delta (that is a separate comment).
  *
  * @params: (rawComment: string) -> Full deterministic comment from renderComment.
- * @params: (digest: string)     -> The `## Summary` block from the Hub (aiSummary).
+ * @params: (digest: string)     -> The `## Summary` block from the Hub (aiSummary), or ''.
  * @returns: string — the composed, concise comment. The COMMENT_MARKER stays the first line.
  */
 function composeWithDigest(rawComment, digest) {
@@ -37009,16 +37059,19 @@ function composeWithDigest(rawComment, digest) {
     if (i === -1) {
         // No section divider (empty-blast comment): nothing heavy to collapse, so
         // never introduce a `---` divider or a `<details>` "📋 Full report" expander
-        // this comment never had. Keep today's append-the-digest layout so the
-        // byte-output is preserved.
+        // this comment never had. With no digest either, the input IS the output.
+        if (!block)
+            return rawComment;
         return `${rawComment.trimEnd()}\n\n---\n\n${block}\n`;
     }
     // Split at the first divider: head = marker/header/verdict/metrics, rest =
-    // all the detail sections. Rebuild as head → Summary → one collapsed expander.
+    // all the detail sections. Rebuild as head → Summary (when present) → one
+    // collapsed expander.
     const head = rawComment.slice(0, i).trimEnd();
     const rest = rawComment.slice(i + sep.length).trim();
     const summary = buildDetailSummary(rawComment);
-    return (`${head}\n\n${block}\n\n---\n\n` +
+    const lead = block ? `\n\n${block}` : '';
+    return (`${head}${lead}\n\n---\n\n` +
         `<details>\n<summary><b>${summary}</b></summary>\n\n${rest}\n\n</details>\n`);
 }
 /** Per-SHA marker prefix for the standalone since-last-commit comment. */
@@ -37062,13 +37115,23 @@ function shortSha(sha) {
     return sha.length > 7 ? sha.slice(0, 7) : sha;
 }
 /**
- * @brief: Render the "Commit summary" delta block. The `summary` is
- *         Hub-generated prose (same trust level as the aiSummary digest) and is
- *         spliced as-is — the renderer escapes nothing here, matching how the
- *         digest is treated. Ends with a single trailing newline.
+ * @brief: Render the "Commit summary" delta block: a humanized "What's new in
+ *         this push" header, the Hub-generated prose (same trust level as the
+ *         aiSummary digest, spliced as-is — the renderer escapes nothing here,
+ *         matching how the digest is treated), and a pointer at the main
+ *         review comment. Keep the copy byte-identical to the Hub's
+ *         comment-renderer.ts renderSinceCommitComment. Ends with a single
+ *         trailing newline.
  */
 function buildDeltaBlock(d) {
-    return `## Commit \`${shortSha(d.headSha)}\` summary\n${d.summary}\n`;
+    return [
+        `### 🔄 What's new in this push (\`${shortSha(d.headSha)}\`)`,
+        '',
+        d.summary,
+        '',
+        '_The main GitNexus review comment has the full, updated report._',
+        '',
+    ].join('\n');
 }
 /**
  * @brief: Build the collapsed-expander summary line, e.g.
@@ -37488,7 +37551,45 @@ function normalizeFindingItem(v) {
         item.callers = callers;
     if (typeof v.category === 'string' && v.category.length > 0)
         item.category = v.category;
+    const suggestion = normalizeSuggestion(v.suggestion);
+    if (suggestion)
+        item.suggestion = suggestion;
     return item;
+}
+/** Suggestion size caps — keep identical to the Hub's suggestion-gate.ts. */
+const MAX_SUGGESTION_LINES = 15;
+const MAX_SUGGESTION_CHARS = 1_500;
+/**
+ * Client-side revalidation of a Hub suggestion — mandatory for a committable
+ * artifact (render-findings.ts splices `code` inside a fence VERBATIM, past
+ * neutralizeMarkup). Mirrors the Hub gate's content rules: string, LF-only,
+ * size caps, no line able to open/close a fence, no HTML-comment delimiters
+ * (the reconcile marker regexes scan the RAW body), no NUL. A malformed value
+ * drops the FIELD, never the finding. `safe` must be literally true to stay
+ * committable; anything else renders as the plain-block variant.
+ */
+function normalizeSuggestion(v) {
+    if (!isObject(v))
+        return undefined;
+    const { code, safe } = v;
+    if (typeof code !== 'string' || code.trim().length === 0)
+        return undefined;
+    if (code.length > MAX_SUGGESTION_CHARS || code.includes('\r') || code.includes('\u0000')) {
+        return undefined;
+    }
+    const lines = code.split('\n');
+    if (lines.length > MAX_SUGGESTION_LINES)
+        return undefined;
+    if (lines.some((l) => /^\s*(`{3,}|~{3,})/.test(l)))
+        return undefined;
+    if (code.includes('<!--') || code.includes('-->'))
+        return undefined;
+    const blockedBy = normalizeCallers(v.blockedBy);
+    return {
+        code,
+        safe: safe === true,
+        ...(blockedBy.length > 0 ? { blockedBy } : {}),
+    };
 }
 /**
  * Validate a NEW-side anchor range; both lines must be positive INTEGERS and

@@ -303,17 +303,17 @@ describe('renderComment — changed files', () => {
 describe('renderComment — verdict', () => {
   it('includes a rationale clause for CRITICAL', () => {
     const out = renderComment(loadBlast('blast-result-flows.json'), OPTS);
-    expect(out).toContain('Blast level: `CRITICAL`');
-    expect(out).toContain('critical surface');
-    expect(out).toContain('flows affected');
+    expect(out).toContain('**CRITICAL blast radius**');
+    expect(out).toContain('critical surface, so review the dependents carefully before merging');
+    expect(out).toContain('execution flow');
   });
 
   it('emits no rationale clause for LOW', () => {
     const out = renderComment(loadBlast('blast-result-full.json'), OPTS);
-    expect(out).toContain('Blast level: `LOW`');
+    expect(out).toContain('**LOW blast radius**');
     expect(out).not.toContain('critical surface');
-    expect(out).not.toContain('high reach');
-    expect(out).not.toContain('moderate reach');
+    expect(out).not.toContain('dependent list before merging');
+    expect(out).not.toContain('spot-check of the dependents');
   });
 
   it('includes the stale marker when stale', () => {
@@ -339,7 +339,7 @@ describe('renderComment — verdict', () => {
     });
     const out = renderComment(blast, OPTS);
     expect(out).toContain('stale, re-run for fresh analysis');
-    expect(out).toContain('moderate reach');
+    expect(out).toContain('spot-check of the dependents');
   });
 
   it('survives into the headline-only variant for an oversized PR', () => {
@@ -376,7 +376,7 @@ describe('renderComment — verdict', () => {
     });
     const out = renderComment(blast, OPTS);
     expect(out.length).toBeLessThanOrEqual(CHAR_BUDGET);
-    expect(out).toContain('Blast level: `CRITICAL`');
+    expect(out).toContain('**CRITICAL blast radius**');
   });
 });
 
@@ -517,7 +517,7 @@ describe('renderComment — crossRepo rendering', () => {
       sym('acme/mobile', 0.95),
     ]);
     const out = renderComment(blast, OPTS);
-    expect(out).toContain('affects 2 other repos (acme/web, acme/mobile)');
+    expect(out).toContain('It also reaches 2 other repos (acme/web, acme/mobile).');
   });
 
   it('groups HTTP routes and messaging topics into compact channels', () => {
@@ -645,7 +645,7 @@ describe('renderComment — crossRepo rendering', () => {
     expect(out).toContain('## Cross-Repo Impact');
     expect(out).toContain('<summary><b>acme/web · 5 interfaces</b></summary>'); // true count
     expect(out).toContain('_…and 2 more in this repo._'); // only 3 rendered at capped
-    expect(out).toContain('affects 1 other repo (acme/web)'); // verdict clause present
+    expect(out).toContain('It also reaches 1 other repo (acme/web).'); // verdict clause present
   });
 
   it('degrades an unknown schemaVersion to an error envelope', () => {
@@ -863,7 +863,7 @@ describe('renderComment — HTTP symbol tier + call sites', () => {
     expect(out).toContain('## Cross-Repo Impact');
     expect(out).toContain('**HTTP routes**');
     expect(out).not.toContain('called from'); // call-site detail dropped at capped
-    expect(out).toContain('Blast level: `HIGH`'); // headline survives
+    expect(out).toContain('**HIGH blast radius**'); // headline survives
   });
 });
 

@@ -16,18 +16,19 @@
 import type { SinceLastCommit } from './types/blast-result';
 
 /**
- * @brief: Splice the Hub's summary digest into the deterministic comment and
- *         collapse the heavy detail beneath it. The default-visible comment
- *         becomes just the header, one-line verdict, metrics strip, and the
- *         readable `## Summary` digest — so a 160-symbol / 100-file PR no longer
- *         floods the thread. Every detail table is kept verbatim from the
- *         renderer but tucked inside ONE collapsed `<details>` expander, one
- *         click away. Falls back to appending the digest if there is no detail
- *         body (empty-blast comment). This produces the MAIN comment only — it
+ * @brief: Splice the Hub's summary digest (when present) into the
+ *         deterministic comment and collapse the heavy detail beneath it —
+ *         digest or not. The default-visible comment becomes just the header,
+ *         plain-language verdict, metrics strip, and (when the LLM produced
+ *         one) the readable `## Summary` digest — so a 160-symbol / 100-file
+ *         PR no longer floods the thread, and a FAILED digest no longer dumps
+ *         every table above the fold. Every detail table is kept verbatim
+ *         from the renderer but tucked inside ONE collapsed `<details>`
+ *         expander, one click away. This produces the MAIN comment only — it
  *         carries no since-last-commit delta (that is a separate comment).
  *
  * @params: (rawComment: string) -> Full deterministic comment from renderComment.
- * @params: (digest: string)     -> The `## Summary` block from the Hub (aiSummary).
+ * @params: (digest: string)     -> The `## Summary` block from the Hub (aiSummary), or ''.
  * @returns: string — the composed, concise comment. The COMMENT_MARKER stays the first line.
  */
 export function composeWithDigest(rawComment: string, digest: string): string {
@@ -38,18 +39,20 @@ export function composeWithDigest(rawComment: string, digest: string): string {
   if (i === -1) {
     // No section divider (empty-blast comment): nothing heavy to collapse, so
     // never introduce a `---` divider or a `<details>` "📋 Full report" expander
-    // this comment never had. Keep today's append-the-digest layout so the
-    // byte-output is preserved.
+    // this comment never had. With no digest either, the input IS the output.
+    if (!block) return rawComment;
     return `${rawComment.trimEnd()}\n\n---\n\n${block}\n`;
   }
 
   // Split at the first divider: head = marker/header/verdict/metrics, rest =
-  // all the detail sections. Rebuild as head → Summary → one collapsed expander.
+  // all the detail sections. Rebuild as head → Summary (when present) → one
+  // collapsed expander.
   const head = rawComment.slice(0, i).trimEnd();
   const rest = rawComment.slice(i + sep.length).trim();
   const summary = buildDetailSummary(rawComment);
+  const lead = block ? `\n\n${block}` : '';
   return (
-    `${head}\n\n${block}\n\n---\n\n` +
+    `${head}${lead}\n\n---\n\n` +
     `<details>\n<summary><b>${summary}</b></summary>\n\n${rest}\n\n</details>\n`
   );
 }
@@ -99,13 +102,23 @@ function shortSha(sha: string): string {
 }
 
 /**
- * @brief: Render the "Commit summary" delta block. The `summary` is
- *         Hub-generated prose (same trust level as the aiSummary digest) and is
- *         spliced as-is — the renderer escapes nothing here, matching how the
- *         digest is treated. Ends with a single trailing newline.
+ * @brief: Render the "Commit summary" delta block: a humanized "What's new in
+ *         this push" header, the Hub-generated prose (same trust level as the
+ *         aiSummary digest, spliced as-is — the renderer escapes nothing here,
+ *         matching how the digest is treated), and a pointer at the main
+ *         review comment. Keep the copy byte-identical to the Hub's
+ *         comment-renderer.ts renderSinceCommitComment. Ends with a single
+ *         trailing newline.
  */
 function buildDeltaBlock(d: SinceLastCommit): string {
-  return `## Commit \`${shortSha(d.headSha)}\` summary\n${d.summary}\n`;
+  return [
+    `### 🔄 What's new in this push (\`${shortSha(d.headSha)}\`)`,
+    '',
+    d.summary,
+    '',
+    '_The main GitNexus review comment has the full, updated report._',
+    '',
+  ].join('\n');
 }
 
 /**
