@@ -25,7 +25,7 @@ inputs:
     required: false
     default: '10'
   inline-severity-floor:
-    description: 'Minimum severity for an inline review comment: warning | error (narrowing only). "error" posts only error-severity findings inline. Default "warning".'
+    description: 'Minimum severity for an inline review comment: info | warning | error (narrowing only). "error" posts only error-severity findings inline; "info" additionally posts nits (minor real defects, not style preferences). Default "warning", so nits are opt-in.'
     required: false
     default: 'warning'
 outputs:

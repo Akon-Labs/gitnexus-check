@@ -35156,9 +35156,11 @@ const GITHUB_COMMENT_HARD_CAP = 65_000;
 /**
  * @brief: Read the Wave-2 inline-findings inputs, all narrowing-only. Defaults
  *         (empty inputs, as in unit tests) keep the feature OFF: `enabled` false,
- *         `maxItems` 10, `severityFloor` 'warning'. `max-inline-findings` is
- *         clamped to a positive integer; `inline-severity-floor` accepts only
- *         'error' to raise the floor, anything else (incl. '') stays 'warning'.
+ *         `maxItems` 10, `severityFloor` 'warning' (so `info` nits are
+ *         opt-in via `inline-severity-floor: info`). `max-inline-findings` is
+ *         clamped to a positive integer; `inline-severity-floor` accepts 'error'
+ *         to raise the floor and 'info' to lower it to nits, anything else
+ *         (incl. '') stays 'warning'.
  *
  * @returns: { enabled, maxItems, severityFloor } — the resolved findings config.
  */
@@ -35166,7 +35168,12 @@ function readFindingsConfig() {
     const enabled = core.getInput('inline-findings').trim().toLowerCase() === 'true';
     const parsedMax = Number.parseInt(core.getInput('max-inline-findings').trim(), 10);
     const maxItems = Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : 10;
-    const severityFloor = core.getInput('inline-severity-floor').trim().toLowerCase() === 'error' ? 'error' : 'warning';
+    // The floor still DEFAULTS to 'warning', which now means nits are opt-in.
+    // An existing workflow that upgrades the Action must not start receiving a
+    // finding class it never asked for; `inline-severity-floor: info` turns them
+    // on deliberately.
+    const raw = core.getInput('inline-severity-floor').trim().toLowerCase();
+    const severityFloor = raw === 'error' ? 'error' : raw === 'info' ? 'info' : 'warning';
     return { enabled, maxItems, severityFloor };
 }
 /** True when the PR payload marks this PR as a draft. Never throws. */
@@ -35175,7 +35182,9 @@ function isDraftPr(payload) {
 }
 /** Total order over finding severities so a floor comparison is a numeric `>=`. */
 function severityRank(severity) {
-    return severity === 'error' ? 1 : 0;
+    if (severity === 'error')
+        return 1;
+    return severity === 'info' ? -1 : 0;
 }
 /**
  * @brief: Narrow a Hub findings list by the Action's severity floor and inline
@@ -36923,7 +36932,7 @@ function renderFallbackSection(items, opts) {
 }
 /** One fallback bullet: badge + title + `path`(:line) + a truncated rationale tail. */
 function renderFallbackItem(item) {
-    const badge = item.severity === 'error' ? '🔴' : '🟡';
+    const badge = item.severity === 'error' ? '🔴' : item.severity === 'info' ? '⚪' : '🟡';
     const loc = item.anchor
         ? `${escapeCode(item.path)}:${item.anchor.startLine}`
         : escapeCode(item.path);
@@ -36949,7 +36958,11 @@ function suggestionCaveat(suggestion) {
 }
 /** Severity → emoji + bold label for the finding badge. */
 function severityBadge(severity) {
-    return severity === 'error' ? '🔴 **Error**' : '🟡 **Warning**';
+    if (severity === 'error')
+        return '🔴 **Error**';
+    if (severity === 'info')
+        return '⚪ Nit';
+    return '🟡 **Warning**';
 }
 /** `path:line` for a known caller, dropping the suffix when the line is absent. */
 function callerLoc(c) {
@@ -36966,8 +36979,8 @@ function footer(item) {
 }
 /** Order errors before warnings, then higher confidence first. */
 function bySeverityThenConfidence(a, b) {
-    const sa = a.severity === 'error' ? 0 : 1;
-    const sb = b.severity === 'error' ? 0 : 1;
+    const sa = a.severity === 'error' ? 0 : a.severity === 'info' ? 2 : 1;
+    const sb = b.severity === 'error' ? 0 : b.severity === 'info' ? 2 : 1;
     if (sa !== sb)
         return sa - sb;
     return b.confidence - a.confidence;
@@ -37515,7 +37528,7 @@ function normalizeFindingItem(v) {
         return null;
     if (origin !== 'deterministic' && origin !== 'generated')
         return null;
-    if (severity !== 'warning' && severity !== 'error')
+    if (severity !== 'warning' && severity !== 'error' && severity !== 'info')
         return null;
     if (typeof confidence !== 'number' || !Number.isFinite(confidence))
         return null;

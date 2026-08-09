@@ -577,7 +577,7 @@ describe('normalizeFindings — Wave-2 inline findings envelope', () => {
         'not-an-object',
         { ...validItem, fingerprint: '' }, // empty fingerprint
         { ...validItem, fingerprint: undefined }, // missing fingerprint
-        { ...validItem, severity: 'info' }, // unknown severity
+        { ...validItem, severity: 'nit' }, // unknown severity ('info' is valid now)
         { ...validItem, origin: 'human' }, // unknown origin
         { ...validItem, confidence: 'high' }, // non-number confidence
         { ...validItem, title: '' }, // empty title
@@ -588,6 +588,16 @@ describe('normalizeFindings — Wave-2 inline findings envelope', () => {
     });
     expect(out?.items).toHaveLength(1);
     expect(out?.items[0].fingerprint).toBe(VALID_FP);
+  });
+
+  it("accepts severity 'info' — the Hub's nit tier survives normalisation", () => {
+    const out = normalizeFindings({
+      schemaVersion: '1',
+      analyzedSha: 'x',
+      items: [{ ...validItem, severity: 'info' }],
+    });
+    expect(out?.items).toHaveLength(1);
+    expect(out?.items[0].severity).toBe('info');
   });
 
   it('drops an item whose fingerprint is not a clean sha256(-N) shape (#12)', () => {

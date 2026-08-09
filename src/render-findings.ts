@@ -167,7 +167,7 @@ export function renderFallbackSection(items: FindingItem[], opts?: { maxItems?: 
 
 /** One fallback bullet: badge + title + `path`(:line) + a truncated rationale tail. */
 function renderFallbackItem(item: FindingItem): string {
-  const badge = item.severity === 'error' ? '🔴' : '🟡';
+  const badge = item.severity === 'error' ? '🔴' : item.severity === 'info' ? '⚪' : '🟡';
   const loc = item.anchor
     ? `${escapeCode(item.path)}:${item.anchor.startLine}`
     : escapeCode(item.path);
@@ -194,8 +194,10 @@ function suggestionCaveat(suggestion: NonNullable<FindingItem['suggestion']>): s
 }
 
 /** Severity → emoji + bold label for the finding badge. */
-function severityBadge(severity: 'warning' | 'error'): string {
-  return severity === 'error' ? '🔴 **Error**' : '🟡 **Warning**';
+function severityBadge(severity: 'warning' | 'error' | 'info'): string {
+  if (severity === 'error') return '🔴 **Error**';
+  if (severity === 'info') return '⚪ Nit';
+  return '🟡 **Warning**';
 }
 
 /** `path:line` for a known caller, dropping the suffix when the line is absent. */
@@ -216,8 +218,8 @@ function footer(item: FindingItem): string {
 
 /** Order errors before warnings, then higher confidence first. */
 function bySeverityThenConfidence(a: FindingItem, b: FindingItem): number {
-  const sa = a.severity === 'error' ? 0 : 1;
-  const sb = b.severity === 'error' ? 0 : 1;
+  const sa = a.severity === 'error' ? 0 : a.severity === 'info' ? 2 : 1;
+  const sb = b.severity === 'error' ? 0 : b.severity === 'info' ? 2 : 1;
   if (sa !== sb) return sa - sb;
   return b.confidence - a.confidence;
 }

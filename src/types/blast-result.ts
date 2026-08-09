@@ -258,7 +258,10 @@ export interface SinceLastCommit {
  *                               review-comment marker so a re-run updates in place.
  * @params: (checkId)         -> Detector id (e.g. 'removed-export-with-consumers').
  * @params: (origin)          -> 'deterministic' (Tier-D, graph-proven) or 'generated' (Tier-G, LLM).
- * @params: (severity)        -> 'warning' | 'error'; drives the badge + the severity floor.
+ * @params: (severity)        -> 'error' | 'warning' | 'info'; drives the badge + the severity floor.
+ *                               'info' is a MINOR REAL DEFECT (a nit), not a style preference — it
+ *                               renders muted and sorts last. An older Action drops it, which is the
+ *                               correct failure: a nit is the one finding class safe to lose.
  * @params: (confidence)      -> 0..1 Hub confidence; drives fallback ordering.
  * @params: (title/rationale) -> Hub-sanitized display text; the Action still escapes markdown structure.
  * @params: (path)            -> NEW-side file path the finding is about; the review comment's path.
@@ -273,7 +276,7 @@ export interface FindingItem {
   fingerprint: string;
   checkId: string;
   origin: 'deterministic' | 'generated';
-  severity: 'warning' | 'error';
+  severity: 'warning' | 'error' | 'info';
   confidence: number;
   title: string;
   rationale: string;
@@ -710,7 +713,7 @@ function normalizeFindingItem(v: unknown): FindingItem | null {
   if (!FINGERPRINT_RE.test(fingerprint)) return null;
   if (typeof checkId !== 'string') return null;
   if (origin !== 'deterministic' && origin !== 'generated') return null;
-  if (severity !== 'warning' && severity !== 'error') return null;
+  if (severity !== 'warning' && severity !== 'error' && severity !== 'info') return null;
   if (typeof confidence !== 'number' || !Number.isFinite(confidence)) return null;
   if (typeof title !== 'string' || title.length === 0) return null;
   if (typeof rationale !== 'string') return null;

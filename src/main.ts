@@ -390,22 +390,28 @@ const GITHUB_COMMENT_HARD_CAP = 65_000;
 /**
  * @brief: Read the Wave-2 inline-findings inputs, all narrowing-only. Defaults
  *         (empty inputs, as in unit tests) keep the feature OFF: `enabled` false,
- *         `maxItems` 10, `severityFloor` 'warning'. `max-inline-findings` is
- *         clamped to a positive integer; `inline-severity-floor` accepts only
- *         'error' to raise the floor, anything else (incl. '') stays 'warning'.
+ *         `maxItems` 10, `severityFloor` 'warning' (so `info` nits are
+ *         opt-in via `inline-severity-floor: info`). `max-inline-findings` is
+ *         clamped to a positive integer; `inline-severity-floor` accepts 'error'
+ *         to raise the floor and 'info' to lower it to nits, anything else
+ *         (incl. '') stays 'warning'.
  *
  * @returns: { enabled, maxItems, severityFloor } — the resolved findings config.
  */
 function readFindingsConfig(): {
   enabled: boolean;
   maxItems: number;
-  severityFloor: 'warning' | 'error';
+  severityFloor: 'info' | 'warning' | 'error';
 } {
   const enabled = core.getInput('inline-findings').trim().toLowerCase() === 'true';
   const parsedMax = Number.parseInt(core.getInput('max-inline-findings').trim(), 10);
   const maxItems = Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : 10;
-  const severityFloor =
-    core.getInput('inline-severity-floor').trim().toLowerCase() === 'error' ? 'error' : 'warning';
+  // The floor still DEFAULTS to 'warning', which now means nits are opt-in.
+  // An existing workflow that upgrades the Action must not start receiving a
+  // finding class it never asked for; `inline-severity-floor: info` turns them
+  // on deliberately.
+  const raw = core.getInput('inline-severity-floor').trim().toLowerCase();
+  const severityFloor = raw === 'error' ? 'error' : raw === 'info' ? 'info' : 'warning';
   return { enabled, maxItems, severityFloor };
 }
 
@@ -415,8 +421,9 @@ function isDraftPr(payload: unknown): boolean {
 }
 
 /** Total order over finding severities so a floor comparison is a numeric `>=`. */
-function severityRank(severity: 'warning' | 'error'): number {
-  return severity === 'error' ? 1 : 0;
+function severityRank(severity: 'warning' | 'error' | 'info'): number {
+  if (severity === 'error') return 1;
+  return severity === 'info' ? -1 : 0;
 }
 
 /**
@@ -433,7 +440,7 @@ function severityRank(severity: 'warning' | 'error'): number {
  */
 function narrowFindings(
   items: FindingItem[],
-  cfg: { maxItems: number; severityFloor: 'warning' | 'error' },
+  cfg: { maxItems: number; severityFloor: 'info' | 'warning' | 'error' },
 ): { inline: FindingItem[]; demoted: FindingItem[]; suppressed: number } {
   const floor = severityRank(cfg.severityFloor);
   const afterFloor = items.filter((it) => severityRank(it.severity) >= floor);
