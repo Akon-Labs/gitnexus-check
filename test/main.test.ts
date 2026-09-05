@@ -33,6 +33,8 @@ vi.mock('@actions/core', () => ({
 const ghContext = {
   eventName: 'pull_request',
   payload: {
+    action: undefined as string | undefined,
+    comment: undefined as Record<string, unknown> | undefined,
     // Absent by default (same-repo PR). Fork tests set repository + head.repo to
     // exercise the fork precheck; beforeEach resets both.
     repository: undefined as { full_name?: string } | undefined,
@@ -101,6 +103,13 @@ vi.mock('../src/post-review', async () => {
   };
 });
 
+const handleReviewReplySpy = vi.fn();
+const asReviewReplyClientSpy = vi.fn(() => ({}));
+vi.mock('../src/review-reply', () => ({
+  handleReviewReply: (...args: unknown[]) => handleReviewReplySpy(...args),
+  asReviewReplyClient: (...args: unknown[]) => asReviewReplyClientSpy(...args),
+}));
+
 const parseThresholdSpy = vi.fn();
 const evaluateGateSpy = vi.fn();
 vi.mock('../src/gate', async () => {
@@ -133,6 +142,8 @@ beforeEach(() => {
   inputs['token'] = 'gnx_test';
   inputs['github-token'] = 'ghp_test';
   ghContext.eventName = 'pull_request';
+  ghContext.payload.action = undefined;
+  ghContext.payload.comment = undefined;
   ghContext.payload.repository = undefined;
   ghContext.payload.pull_request.number = 152;
   ghContext.payload.pull_request.draft = undefined;
@@ -149,6 +160,9 @@ beforeEach(() => {
   parseThresholdSpy.mockReset();
   evaluateGateSpy.mockReset();
   reconcileSpy.mockReset();
+  handleReviewReplySpy.mockReset();
+  handleReviewReplySpy.mockResolvedValue({ action: 'skipped' });
+  asReviewReplyClientSpy.mockClear();
   reconcileSpy.mockResolvedValue({ posted: 0, updated: 0, failed: [] });
   // Default: advisory gate (empty input → null threshold → neutral).
   parseThresholdSpy.mockReturnValue(null);
@@ -199,7 +213,7 @@ describe('main — happy path', () => {
     expect(body).toContain('🟢 LOW — nothing scary here.');
   });
 
-  it('posts the deterministic body unchanged when aiSummary is absent', async () => {
+  it('collapses detail into the Full report expander (no digest lead) when aiSummary is absent', async () => {
     resolveSpy.mockResolvedValue('repo-uuid');
     refreshSpy.mockResolvedValue(undefined);
     const blastRaw = loadFullBlast();
@@ -213,10 +227,10 @@ describe('main — happy path', () => {
 
     const body = (postSpy.mock.calls[0][0] as { body: string }).body;
     expect(body).not.toContain('## Summary');
-    expect(body).not.toContain('📋 Full report');
+    expect(body).toContain('📋 Full report');
   });
 
-  it('posts the raw rendered body (compose not invoked) when neither aiSummary nor sinceLastCommit is present', async () => {
+  it('posts the composed body (empty digest) when neither aiSummary nor sinceLastCommit is present', async () => {
     resolveSpy.mockResolvedValue('repo-uuid');
     refreshSpy.mockResolvedValue(undefined);
     const blastRaw = loadFullBlast();
@@ -226,16 +240,21 @@ describe('main — happy path', () => {
     getBlastSpy.mockResolvedValue(blast);
     postSpy.mockResolvedValue({ commentId: 1, action: 'created' });
 
-    // Compute the raw rendered comment the same way main does, to assert equality.
+    // Compute the composed comment the same way main does, to assert equality:
+    // compose ALWAYS runs now (always-collapse), with an empty digest here.
     const { renderComment } = await import('../src/render-comment');
-    const expected = renderComment(blast, { prNumber: 152, hubUrl: 'https://hub.example.com' });
+    const { composeWithDigest } = await import('../src/slm-format');
+    const expected = composeWithDigest(
+      renderComment(blast, { prNumber: 152, hubUrl: 'https://hub.example.com' }),
+      '',
+    );
 
     const { main } = await import('../src/main');
     await main();
 
     const body = (postSpy.mock.calls[0][0] as { body: string }).body;
     expect(body).toBe(expected);
-    expect(body).not.toContain('## Commit `');
+    expect(body).not.toContain("What's new in this push");
   });
 
   it('posts a SEPARATE per-SHA comment for the since-last-commit delta; main comment carries no delta', async () => {
@@ -259,13 +278,13 @@ describe('main — happy path', () => {
 
     const mainCall = postSpy.mock.calls[0][0] as { marker: string; body: string };
     expect(mainCall.marker).toBe('<!-- gitnexus-review-v1 -->');
-    expect(mainCall.body).not.toContain('## Commit `');
+    expect(mainCall.body).not.toContain("What's new in this push");
     expect(mainCall.body).not.toContain('gitnexus-since-commit');
 
     const sinceCall = postSpy.mock.calls[1][0] as { marker: string; body: string };
     expect(sinceCall.marker).toBe(sinceCommitMarker(headSha));
     expect(sinceCall.body).toContain(sinceCommitMarker(headSha));
-    expect(sinceCall.body).toContain('## Commit `a1b2c3d` summary');
+    expect(sinceCall.body).toContain("### 🔄 What's new in this push (`a1b2c3d`)");
     expect(sinceCall.body).toContain('reworked the parser');
 
     // comment-id output stays the MAIN comment id.
@@ -320,6 +339,68 @@ describe('main — non-PR event', () => {
     await main();
     expect(warningSpy).toHaveBeenCalled();
     expect(resolveSpy).not.toHaveBeenCalled();
+    expect(setFailedSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('main — review-thread reply dispatch', () => {
+  it('dispatches created review-comment events without entering the pull_request pipeline', async () => {
+    ghContext.eventName = 'pull_request_review_comment';
+    ghContext.payload.action = 'created';
+    ghContext.payload.comment = {
+      id: 901,
+      body: 'Why?',
+      in_reply_to_id: 900,
+      user: { login: 'reviewer', type: 'User' },
+    };
+
+    const { main } = await import('../src/main');
+    await main();
+
+    expect(handleReviewReplySpy).toHaveBeenCalledOnce();
+    expect(handleReviewReplySpy.mock.calls[0][0]).toMatchObject({
+      hubUrl: 'https://hub.example.com',
+      token: 'gnx_test',
+      owner: 'Akon-Labs',
+      repo: 'gitnexus-enterprise',
+      prNumber: 152,
+      eventComment: ghContext.payload.comment,
+    });
+    expect(resolveSpy).not.toHaveBeenCalled();
+    expect(refreshSpy).not.toHaveBeenCalled();
+    expect(getBlastSpy).not.toHaveBeenCalled();
+    expect(postSpy).not.toHaveBeenCalled();
+    expect(reconcileSpy).not.toHaveBeenCalled();
+    expect(evaluateGateSpy).not.toHaveBeenCalled();
+    expect(setFailedSpy).not.toHaveBeenCalled();
+  });
+
+  it('ignores non-created review-comment events before reading required inputs', async () => {
+    ghContext.eventName = 'pull_request_review_comment';
+    ghContext.payload.action = 'edited';
+    inputs['hub-url'] = '';
+    inputs.token = '';
+    inputs['github-token'] = '';
+
+    const { main } = await import('../src/main');
+    await main();
+
+    expect(handleReviewReplySpy).not.toHaveBeenCalled();
+    expect(setFailedSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps reply-branch configuration failures presentation-only', async () => {
+    ghContext.eventName = 'pull_request_review_comment';
+    ghContext.payload.action = 'created';
+    inputs['hub-url'] = 'http://unsafe.example.com';
+
+    const { main } = await import('../src/main');
+    await main();
+
+    expect(handleReviewReplySpy).not.toHaveBeenCalled();
+    expect(warningSpy).toHaveBeenCalledWith(
+      'GitNexus finding reply skipped because its configuration or event payload was invalid.',
+    );
     expect(setFailedSpy).not.toHaveBeenCalled();
   });
 });
@@ -984,5 +1065,121 @@ describe('main — gated draft-skip (Wave 2)', () => {
     await main();
     expect(resolveSpy).toHaveBeenCalledOnce();
     expect(postSpy).toHaveBeenCalled();
+  });
+});
+
+describe('main — D1 App-primary gate', () => {
+  const anchoredItem = {
+    fingerprint: 'a1',
+    checkId: 'chk',
+    origin: 'deterministic',
+    severity: 'error',
+    confidence: 1,
+    title: 'boom',
+    rationale: 'why',
+    path: 'src/a.ts',
+    anchored: true,
+    anchor: { startLine: 10, endLine: 10 },
+  };
+  const demotedItem = {
+    fingerprint: 'd1',
+    checkId: 'chk',
+    origin: 'generated',
+    severity: 'warning',
+    confidence: 0.9,
+    title: 'soft',
+    rationale: 'demoted',
+    path: 'src/b.ts',
+    anchored: false,
+  };
+
+  async function setupBlast(over: Record<string, unknown>): Promise<void> {
+    resolveSpy.mockResolvedValue('repo-uuid');
+    refreshSpy.mockResolvedValue(undefined);
+    const blastRaw = loadFullBlast();
+    const { isBlastResult, normalizeBlastResult } = await import('../src/types/blast-result');
+    if (!isBlastResult(blastRaw)) throw new Error('bad fixture');
+    const blast = normalizeBlastResult(blastRaw) as Record<string, unknown>;
+    Object.assign(blast, over);
+    getBlastSpy.mockResolvedValue(blast);
+    postSpy.mockResolvedValue({ commentId: 1, action: 'created' });
+  }
+
+  it('App owns SUMMARY → does NOT post the main comment, but the gate still runs', async () => {
+    await setupBlast({ appReview: { active: true, summary: true, inlineFindings: false } });
+    const { main } = await import('../src/main');
+    await main();
+    expect(postSpy).not.toHaveBeenCalled(); // ceded to the App
+    expect(outputs['blast-level']).toBe('LOW'); // gate still ran from blastLevel
+    expect(setFailedSpy).not.toHaveBeenCalled();
+    const logged = infoSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged).toContain('owns the summary comment');
+  });
+
+  it('App owns SUMMARY → does NOT post the since-last-commit comment either', async () => {
+    await setupBlast({
+      appReview: { active: true, summary: true, inlineFindings: false },
+      sinceLastCommit: { headSha: 'deadbee', summary: 'delta prose' },
+    });
+    const { main } = await import('../src/main');
+    await main();
+    // postSpy backs BOTH the main comment and the since-last-commit comment.
+    expect(postSpy).not.toHaveBeenCalled();
+  });
+
+  it('App owns INLINE FINDINGS → does NOT reconcile, but still posts the summary (surface not ceded)', async () => {
+    inputs['inline-findings'] = 'true';
+    ghContext.payload.pull_request.head = { sha: 'abc1234' };
+    await setupBlast({
+      appReview: { active: true, summary: false, inlineFindings: true },
+      findings: {
+        schemaVersion: '1',
+        analyzedSha: 'abc1234',
+        items: [anchoredItem],
+        suppressedCount: 0,
+        truncated: false,
+        error: null,
+      },
+    });
+    const { main } = await import('../src/main');
+    await main();
+    expect(reconcileSpy).not.toHaveBeenCalled(); // inline ceded to the App
+    expect(postSpy).toHaveBeenCalledOnce(); // summary NOT ceded → Action still posts it
+    expect(outputs['inline-findings-posted']).toBe('0');
+    const logged = infoSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged).toContain('owns inline findings');
+  });
+
+  it('default appReview (all-false) → posts as legacy (App owns nothing)', async () => {
+    await setupBlast({ appReview: { active: false, summary: false, inlineFindings: false } });
+    const { main } = await import('../src/main');
+    await main();
+    expect(postSpy).toHaveBeenCalledOnce();
+  });
+
+  it('App owns SUMMARY + inline active + demoted findings → reconciles inline but NEVER re-posts the summary (no double-post)', async () => {
+    // The exact per-surface split D1 supports. Regression guard: the demoted-findings
+    // fallback must NOT re-create the ceded summary comment under COMMENT_MARKER.
+    inputs['inline-findings'] = 'true';
+    ghContext.payload.pull_request.head = { sha: 'abc1234' };
+    reconcileSpy.mockResolvedValue({ posted: 1, updated: 0, failed: [] });
+    await setupBlast({
+      appReview: { active: true, summary: true, inlineFindings: false },
+      findings: {
+        schemaVersion: '1',
+        analyzedSha: 'abc1234',
+        items: [anchoredItem, demotedItem], // demotedItem (non-anchored) → fallback section
+        suppressedCount: 0,
+        truncated: false,
+        error: null,
+      },
+    });
+    const { main } = await import('../src/main');
+    await main();
+    expect(reconcileSpy).toHaveBeenCalledOnce(); // inline surface NOT ceded → still posts
+    expect(postSpy).not.toHaveBeenCalled(); // summary ceded → NO summary comment re-created
+    expect(updateCommentSpy).not.toHaveBeenCalled(); // no Action main comment to update
+    const logged = infoSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(logged).toContain('not re-posting'); // demoted findings logged instead
   });
 });

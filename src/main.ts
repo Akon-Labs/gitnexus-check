@@ -23,6 +23,7 @@ import { renderFallbackSection } from './render-findings';
 import { parseThreshold, evaluateGate } from './gate';
 import { composeWithDigest, renderSinceCommitComment, sinceCommitMarker } from './slm-format';
 import type { FindingItem } from './types/blast-result';
+import { asReviewReplyClient, handleReviewReply } from './review-reply';
 
 /**
  * @brief: Top-level orchestration. Sequence:
@@ -55,11 +56,35 @@ import type { FindingItem } from './types/blast-result';
  * @returns: void — exits via core.setFailed on error or returns cleanly.
  */
 export async function main(): Promise<void> {
+  const ctx = github.context;
+  if (ctx.eventName === 'pull_request_review_comment') {
+    if (ctx.payload.action !== 'created') return;
+    try {
+      const hubUrl = validateHubUrl(core.getInput('hub-url', { required: true }));
+      const token = core.getInput('token', { required: true });
+      const githubToken = core.getInput('github-token', { required: true });
+      await handleReviewReply({
+        client: asReviewReplyClient(github.getOctokit(githubToken)),
+        hubUrl,
+        token,
+        owner: ctx.repo.owner,
+        repo: ctx.repo.repo,
+        prNumber: (ctx.payload.pull_request as { number?: unknown } | undefined)?.number as number,
+        eventComment: ctx.payload.comment,
+        warning: core.warning,
+      });
+    } catch {
+      core.warning(
+        'GitNexus finding reply skipped because its configuration or event payload was invalid.',
+      );
+    }
+    return;
+  }
+
   const hubUrl = validateHubUrl(core.getInput('hub-url', { required: true }));
   const token = core.getInput('token', { required: true });
   const githubToken = core.getInput('github-token', { required: true });
 
-  const ctx = github.context;
   if (ctx.eventName !== 'pull_request') {
     core.warning(`gitnexus-check runs on pull_request events; got "${ctx.eventName}". Skipping.`);
     return;
@@ -128,15 +153,24 @@ export async function main(): Promise<void> {
 
   const rawBody = renderComment(blast, { prNumber, hubUrl });
 
-  // ── 6b. If the Hub produced an LLM summary digest (it holds the Azure key
-  //        and rate-limits the call), splice it into the upsert-by-marker MAIN
-  //        comment and collapse detail beneath it. When no digest is present,
-  //        composeWithDigest is not called and the body is byte-identical to the
-  //        deterministic comment. The since-last-commit delta is NOT part of the
-  //        main comment — it is posted separately below. The Action makes no LLM
-  //        call of its own.
-  const hasDigest = typeof blast.aiSummary === 'string' && blast.aiSummary.trim().length > 0;
-  const body = hasDigest ? composeWithDigest(rawBody, blast.aiSummary ?? '') : rawBody;
+  // ── 6b. Compose the MAIN comment: the detail sections always collapse into
+  //        ONE "Full report" expander, and when the Hub produced an LLM summary
+  //        digest (it holds the Azure key and rate-limits the call) it splices
+  //        in as the default-visible lead. A missing/failed digest must never
+  //        dump every table above the fold — the plain-language verdict + strip
+  //        carry the lead instead. The since-last-commit delta is NOT part of
+  //        the main comment — it is posted separately below. The Action makes
+  //        no LLM call of its own.
+  const body = composeWithDigest(rawBody, blast.aiSummary ?? '');
+
+  // ── D1 App-primary gate: when the native GitNexus App bot owns a review surface
+  //    for this repo, the Action cedes exactly that surface so the two never
+  //    double-post. Per-surface (summary comment + since-last-commit vs inline
+  //    findings) so a migration can hand over one at a time. Defaults to false (App
+  //    owns nothing) on older Hubs and any malformed value → legacy behavior. The
+  //    GATE is unaffected — it is decided from blastLevel alone, below.
+  const appOwnsSummary = blast.appReview?.summary === true;
+  const appOwnsInlineFindings = blast.appReview?.inlineFindings === true;
 
   // ── 7. Post (or update) the MAIN comment. We ATTEMPT the write even on a fork:
   //        a fork PR CAN carry write access (pull_request_target, or a configured
@@ -150,17 +184,26 @@ export async function main(): Promise<void> {
   //        case the rendered review is logged so a failed gate's "See action
   //        log." points at the report.
   let posted;
-  try {
-    const octokit = github.getOctokit(githubToken);
-    posted = await postOrUpdateComment({
-      client: asIssueCommentsClient(octokit),
-      owner,
-      repo,
-      prNumber,
-      marker: COMMENT_MARKER,
-      body,
-    });
-  } catch (err) {
+  if (appOwnsSummary) {
+    // The App bot posts the summary comment for this repo — cede it (D1). The gate
+    // below still runs; log the rendered review so "See action log." still resolves.
+    core.info(
+      'GitNexus App bot owns the summary comment for this repo — the Action is not ' +
+        'posting it (D1 App-primary). The rendered review follows and the gate still applies.',
+    );
+    core.info(body);
+  } else
+    try {
+      const octokit = github.getOctokit(githubToken);
+      posted = await postOrUpdateComment({
+        client: asIssueCommentsClient(octokit),
+        owner,
+        repo,
+        prNumber,
+        marker: COMMENT_MARKER,
+        body,
+      });
+    } catch (err) {
     // Posting the review comment is PRESENTATION — the Hub compute already
     // succeeded and the gate below decides pass/fail from blastLevel alone. So
     // NO comment-post error ever fails the run (doctrine: comment/findings/fork
@@ -209,8 +252,11 @@ export async function main(): Promise<void> {
   //        comment-id output, or affect the gate — the main review is the contract.
   //        Attempted even on fork PRs (a fork may carry write access); a read-only
   //        403 is swallowed into a warning like any other failure — never pre-skipped.
+  //        The since-last-commit comment is part of the SUMMARY surface, so it is
+  //        also ceded when the App owns the summary (D1) — the App posts its own
+  //        per-push delta comment.
   const delta = blast.sinceLastCommit;
-  if (delta != null) {
+  if (delta != null && !appOwnsSummary) {
     try {
       const octokit = github.getOctokit(githubToken);
       const sincePosted = await postOrUpdateComment({
@@ -259,7 +305,19 @@ export async function main(): Promise<void> {
         `not the current head ${headSha}. They will post once the Hub finishes analyzing this commit.`,
     );
   }
-  if (findingsCfg.enabled && findingsFresh && findings != null && findings.error === null) {
+  if (appOwnsInlineFindings && findingsCfg.enabled && findings != null) {
+    // The App bot posts inline review-comment findings for this repo — cede the
+    // whole inline surface (D1) so the two never double-post. Best-effort/gate
+    // unaffected; the inline outputs stay 0 (the Action posted none).
+    core.info('GitNexus App bot owns inline findings for this repo — the Action is not posting them (D1 App-primary).');
+  }
+  if (
+    !appOwnsInlineFindings &&
+    findingsCfg.enabled &&
+    findingsFresh &&
+    findings != null &&
+    findings.error === null
+  ) {
     try {
       const narrowed = narrowFindings(findings.items, findingsCfg);
       inlineSuppressed = findings.suppressedCount + narrowed.suppressed;
@@ -299,7 +357,9 @@ export async function main(): Promise<void> {
               comment_id: posted.commentId,
               body: composed,
             });
-          } else {
+          } else if (!appOwnsSummary) {
+            // The main-comment post FAILED (fork/403) but we may still have write
+            // access — best-effort fresh post carrying the demoted findings.
             await postOrUpdateComment({
               client: asIssueCommentsClient(github.getOctokit(githubToken)),
               owner,
@@ -308,6 +368,16 @@ export async function main(): Promise<void> {
               marker: COMMENT_MARKER,
               body: composed,
             });
+          } else {
+            // D1: the App owns the summary comment (COMMENT_MARKER). Re-posting the
+            // full summary body here to carry the fallback would DOUBLE-POST the very
+            // surface we just ceded. Do not post — log the demoted section so it
+            // stays visible; surfacing it belongs to the App's comment.
+            core.info(
+              'GitNexus App bot owns the summary comment — the Action is not re-posting it to ' +
+                'carry the non-inline findings (D1). They follow in the log:',
+            );
+            core.info(section);
           }
         }
       }
@@ -345,22 +415,28 @@ const GITHUB_COMMENT_HARD_CAP = 65_000;
 /**
  * @brief: Read the Wave-2 inline-findings inputs, all narrowing-only. Defaults
  *         (empty inputs, as in unit tests) keep the feature OFF: `enabled` false,
- *         `maxItems` 10, `severityFloor` 'warning'. `max-inline-findings` is
- *         clamped to a positive integer; `inline-severity-floor` accepts only
- *         'error' to raise the floor, anything else (incl. '') stays 'warning'.
+ *         `maxItems` 10, `severityFloor` 'warning' (so `info` nits are
+ *         opt-in via `inline-severity-floor: info`). `max-inline-findings` is
+ *         clamped to a positive integer; `inline-severity-floor` accepts 'error'
+ *         to raise the floor and 'info' to lower it to nits, anything else
+ *         (incl. '') stays 'warning'.
  *
  * @returns: { enabled, maxItems, severityFloor } — the resolved findings config.
  */
 function readFindingsConfig(): {
   enabled: boolean;
   maxItems: number;
-  severityFloor: 'warning' | 'error';
+  severityFloor: 'info' | 'warning' | 'error';
 } {
   const enabled = core.getInput('inline-findings').trim().toLowerCase() === 'true';
   const parsedMax = Number.parseInt(core.getInput('max-inline-findings').trim(), 10);
   const maxItems = Number.isFinite(parsedMax) && parsedMax > 0 ? parsedMax : 10;
-  const severityFloor =
-    core.getInput('inline-severity-floor').trim().toLowerCase() === 'error' ? 'error' : 'warning';
+  // The floor still DEFAULTS to 'warning', which now means nits are opt-in.
+  // An existing workflow that upgrades the Action must not start receiving a
+  // finding class it never asked for; `inline-severity-floor: info` turns them
+  // on deliberately.
+  const raw = core.getInput('inline-severity-floor').trim().toLowerCase();
+  const severityFloor = raw === 'error' ? 'error' : raw === 'info' ? 'info' : 'warning';
   return { enabled, maxItems, severityFloor };
 }
 
@@ -370,8 +446,9 @@ function isDraftPr(payload: unknown): boolean {
 }
 
 /** Total order over finding severities so a floor comparison is a numeric `>=`. */
-function severityRank(severity: 'warning' | 'error'): number {
-  return severity === 'error' ? 1 : 0;
+function severityRank(severity: 'warning' | 'error' | 'info'): number {
+  if (severity === 'error') return 1;
+  return severity === 'info' ? -1 : 0;
 }
 
 /**
@@ -388,7 +465,7 @@ function severityRank(severity: 'warning' | 'error'): number {
  */
 function narrowFindings(
   items: FindingItem[],
-  cfg: { maxItems: number; severityFloor: 'warning' | 'error' },
+  cfg: { maxItems: number; severityFloor: 'info' | 'warning' | 'error' },
 ): { inline: FindingItem[]; demoted: FindingItem[]; suppressed: number } {
   const floor = severityRank(cfg.severityFloor);
   const afterFloor = items.filter((it) => severityRank(it.severity) >= floor);

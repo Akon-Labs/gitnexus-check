@@ -14,6 +14,7 @@ import {
   resolveRepoId,
   refreshBlast,
   getBlast,
+  requestFindingReply,
   validateHubUrl,
   ACTION_DEVICE_FINGERPRINT,
 } from '../src/hub-client';
@@ -226,5 +227,121 @@ describe('getBlast', () => {
         headSha: 'xyz',
       }),
     ).rejects.toThrow('invalid headSha shape');
+  });
+});
+
+describe('requestFindingReply', () => {
+  const repoId = '123e4567-e89b-12d3-a456-426614174000';
+  const fingerprint = 'a'.repeat(64);
+  const headSha = 'b'.repeat(40);
+  const valid = {
+    schemaVersion: '1',
+    fingerprint,
+    analyzedSha: headSha,
+    verdict: 'supported',
+    reply: 'The graph evidence supports this finding.',
+    evidence: [{ path: 'src/index.ts', startLine: 42, kind: 'anchor' }],
+  };
+
+  it('posts the bounded question with shared auth and stable idempotency', async () => {
+    mockedAxios.post.mockResolvedValueOnce({ data: valid });
+
+    await expect(
+      requestFindingReply({
+        hubUrl: HUB,
+        token: TOKEN,
+        repoId,
+        prNumber: 7,
+        fingerprint,
+        headSha,
+        question: '  Why is this still reachable?  ',
+        triggerCommentId: 901,
+      }),
+    ).resolves.toEqual(valid);
+
+    expect(mockedAxios.post).toHaveBeenCalledWith(
+      `${HUB}/api/repos/${repoId}/prs/7/findings/${fingerprint}/reply`,
+      {
+        schemaVersion: '1',
+        headSha,
+        question: 'Why is this still reachable?',
+      },
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          Authorization: `Bearer ${TOKEN}`,
+          'X-Device-Fingerprint': ACTION_DEVICE_FINGERPRINT,
+          'Idempotency-Key': 'gitnexus-review-reply:v1:901',
+        }),
+      }),
+    );
+  });
+
+  it('accepts the 8001-character sanitized wire maximum', async () => {
+    const response = { ...valid, reply: 'x'.repeat(8_001) };
+    mockedAxios.post.mockResolvedValueOnce({ data: response });
+    await expect(
+      requestFindingReply({
+        hubUrl: HUB,
+        token: TOKEN,
+        repoId,
+        prNumber: 7,
+        fingerprint,
+        headSha,
+        question: 'why?',
+        triggerCommentId: 901,
+      }),
+    ).resolves.toEqual(response);
+  });
+
+  it('rejects unsafe input before transport', async () => {
+    await expect(
+      requestFindingReply({
+        hubUrl: HUB,
+        token: TOKEN,
+        repoId: 'not-a-uuid',
+        prNumber: 7,
+        fingerprint,
+        headSha,
+        question: 'why?',
+        triggerCommentId: 901,
+      }),
+    ).rejects.toThrow('invalid repoId shape');
+    await expect(
+      requestFindingReply({
+        hubUrl: HUB,
+        token: TOKEN,
+        repoId,
+        prNumber: 7,
+        fingerprint,
+        headSha,
+        question: 'x'.repeat(4_001),
+        triggerCommentId: 901,
+      }),
+    ).rejects.toThrow('invalid question');
+    expect(mockedAxios.post).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['wrong schema', { ...valid, schemaVersion: '2' }],
+    ['wrong fingerprint', { ...valid, fingerprint: 'c'.repeat(64) }],
+    ['stale SHA', { ...valid, analyzedSha: 'd'.repeat(40) }],
+    ['unknown verdict', { ...valid, verdict: 'maybe' }],
+    ['oversize reply', { ...valid, reply: 'x'.repeat(8_002) }],
+    ['too much evidence', { ...valid, evidence: Array(10).fill(valid.evidence[0]) }],
+    ['invalid evidence path', { ...valid, evidence: [{ path: 'x'.repeat(501), startLine: 1, kind: 'caller' }] }],
+  ])('rejects a malformed Hub response: %s', async (_label, response) => {
+    mockedAxios.post.mockResolvedValueOnce({ data: response });
+    await expect(
+      requestFindingReply({
+        hubUrl: HUB,
+        token: TOKEN,
+        repoId,
+        prNumber: 7,
+        fingerprint,
+        headSha,
+        question: 'why?',
+        triggerCommentId: 901,
+      }),
+    ).rejects.toBeInstanceOf(SchemaMismatchError);
   });
 });

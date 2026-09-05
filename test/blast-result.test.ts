@@ -6,6 +6,7 @@ import {
   normalizeBlastResult,
   normalizeSinceLastCommit,
   normalizeFindings,
+  normalizeAppReview,
   EMPTY_CROSS_REPO,
   type BlastResult,
 } from '../src/types/blast-result';
@@ -179,6 +180,46 @@ describe('isBlastResult', () => {
     const base = { blastLevel: 'LOW', truncated: false, computedAt: 'x' };
     expect(isBlastResult({ ...base, sinceLastCommit: 'oops' })).toBe(false);
     expect(isBlastResult({ ...base, sinceLastCommit: 42 })).toBe(false);
+  });
+});
+
+describe('normalizeAppReview (D1)', () => {
+  const OFF = { active: false, summary: false, inlineFindings: false };
+
+  it('defaults to all-false (App owns nothing) for absent / null / non-object', () => {
+    expect(normalizeAppReview(undefined)).toEqual(OFF);
+    expect(normalizeAppReview(null)).toEqual(OFF);
+    expect(normalizeAppReview('true')).toEqual(OFF);
+    expect(normalizeAppReview(42)).toEqual(OFF);
+    expect(normalizeAppReview([])).toEqual(OFF);
+    expect(normalizeAppReview({})).toEqual(OFF);
+  });
+
+  it('accepts each surface ONLY on an explicit boolean true', () => {
+    expect(normalizeAppReview({ active: true, summary: true, inlineFindings: false })).toEqual({
+      active: true,
+      summary: true,
+      inlineFindings: false,
+    });
+    expect(normalizeAppReview({ active: true, summary: false, inlineFindings: true })).toEqual({
+      active: true,
+      summary: false,
+      inlineFindings: true,
+    });
+  });
+
+  it('treats truthy NON-boolean values as false (fails safe → Action keeps posting)', () => {
+    // A string 'true', 1, or {} must NOT silently cede a surface.
+    expect(normalizeAppReview({ active: 'true', summary: 1, inlineFindings: {} })).toEqual(OFF);
+  });
+
+  it('normalizeBlastResult always fills appReview with the all-false default when absent', () => {
+    const r = normalizeBlastResult({
+      blastLevel: 'LOW',
+      truncated: false,
+      computedAt: '2026-01-01T00:00:00Z',
+    } as unknown as BlastResult);
+    expect(r.appReview).toEqual(OFF);
   });
 });
 
@@ -467,6 +508,43 @@ describe('normalizeFindings — Wave-2 inline findings envelope', () => {
     expect(out?.items[0]).toEqual(validItem);
   });
 
+  describe('normalizeSuggestion — client-side revalidation of a committable artifact', () => {
+    const withSuggestion = (suggestion: unknown) =>
+      normalizeFindings({ schemaVersion: '1', items: [{ ...validItem, suggestion }] })?.items[0];
+
+    it('accepts a valid suggestion and keeps safe:true only when literally true', () => {
+      const ok = withSuggestion({ code: 'const x = 1;', safe: true });
+      expect(ok?.suggestion).toEqual({ code: 'const x = 1;', safe: true });
+      const coerced = withSuggestion({ code: 'const x = 1;', safe: 'true' });
+      expect(coerced?.suggestion?.safe).toBe(false);
+    });
+
+    it('normalizes blockedBy through the caller validator', () => {
+      const out = withSuggestion({
+        code: 'const x = 1;',
+        safe: false,
+        blockedBy: [{ filePath: 'src/a.ts', startLine: 3 }, { filePath: '' }, 'junk'],
+      });
+      expect(out?.suggestion?.blockedBy).toEqual([{ filePath: 'src/a.ts', startLine: 3 }]);
+    });
+
+    it.each([
+      ['non-string code', { code: 42, safe: true }],
+      ['empty code', { code: '   ', safe: true }],
+      ['CR line endings', { code: 'a\r\nb', safe: true }],
+      ['fence-opening line', { code: 'ok();\n``` evil', safe: true }],
+      ['tilde fence line', { code: '~~~\nx', safe: true }],
+      ['HTML comment open', { code: 'x <!-- marker', safe: true }],
+      ['HTML comment close', { code: 'x --> y', safe: true }],
+      ['over 15 lines', { code: Array.from({ length: 16 }, (_, i) => `l${i}`).join('\n'), safe: true }],
+      ['not an object', 'const x = 1;'],
+    ])('drops the FIELD (never the finding) for %s', (_label, suggestion) => {
+      const out = withSuggestion(suggestion);
+      expect(out).toBeDefined(); // the finding itself survives
+      expect(out?.suggestion).toBeUndefined();
+    });
+  });
+
   it('degrades an unknown schemaVersion to the error envelope (post nothing inline)', () => {
     const out = normalizeFindings({
       schemaVersion: '2',
@@ -499,7 +577,7 @@ describe('normalizeFindings — Wave-2 inline findings envelope', () => {
         'not-an-object',
         { ...validItem, fingerprint: '' }, // empty fingerprint
         { ...validItem, fingerprint: undefined }, // missing fingerprint
-        { ...validItem, severity: 'info' }, // unknown severity
+        { ...validItem, severity: 'nit' }, // unknown severity ('info' is valid now)
         { ...validItem, origin: 'human' }, // unknown origin
         { ...validItem, confidence: 'high' }, // non-number confidence
         { ...validItem, title: '' }, // empty title
@@ -510,6 +588,16 @@ describe('normalizeFindings — Wave-2 inline findings envelope', () => {
     });
     expect(out?.items).toHaveLength(1);
     expect(out?.items[0].fingerprint).toBe(VALID_FP);
+  });
+
+  it("accepts severity 'info' — the Hub's nit tier survives normalisation", () => {
+    const out = normalizeFindings({
+      schemaVersion: '1',
+      analyzedSha: 'x',
+      items: [{ ...validItem, severity: 'info' }],
+    });
+    expect(out?.items).toHaveLength(1);
+    expect(out?.items[0].severity).toBe('info');
   });
 
   it('drops an item whose fingerprint is not a clean sha256(-N) shape (#12)', () => {

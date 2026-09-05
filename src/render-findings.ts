@@ -11,8 +11,11 @@
  *         gates). The Action is defence-in-depth — it additionally escapes
  *         anything it interpolates into markdown *structure* (HTML-comment
  *         delimiters that could clone/close our markers, `@`-mentions that could
- *         ping, and — critically — triple-backtick runs) and NEVER renders a
- *         committable suggestion fence in Wave 2.
+ *         ping, and — critically — triple-backtick runs). No fence is ever
+ *         produced from FREE TEXT; a committable ```suggestion fence renders
+ *         ONLY from the Hub-gated, client-REVALIDATED `suggestion` field
+ *         (normalizeSuggestion in types/blast-result.ts), and only when the
+ *         Hub marked it safe AND the anchor is single-line.
  */
 
 import type { FindingItem } from './types/blast-result';
@@ -59,10 +62,13 @@ export function findingFingerprintFromBody(body: string): string | null {
 
 /**
  * @brief: Render one finding as a PR review-comment body: the hidden fingerprint
- *         marker, a severity badge + title, the rationale prose, an optional
- *         known-callers list (deterministic findings only, capped), and a
- *         one-line "why this matters" footer naming GitNexus. Never emits a code
- *         fence, so no committable suggestion can be produced in Wave 2.
+ *         marker, a severity badge + title, the rationale prose, the Hub's
+ *         validated suggestion block when present (committable ```suggestion
+ *         fence for safe single-line-anchored fixes; plain block + caveat
+ *         otherwise), an optional known-callers list (deterministic findings
+ *         only, capped), and a one-line "why this matters" footer naming
+ *         GitNexus. Free text can never produce a fence — only the
+ *         normalizeSuggestion-revalidated field reaches one.
  *
  * @params: (item: FindingItem) -> A normalised finding (post-normalizeFindings).
  * @returns: string — the review-comment markdown body.
@@ -77,6 +83,32 @@ export function renderFindingComment(item: FindingItem): string {
   const rationale = sanitizeProse(item.rationale);
   if (rationale.length > 0) {
     lines.push(rationale);
+    lines.push('');
+  }
+
+  if (item.suggestion) {
+    // GitHub replaces the whole commented line range with a suggestion body,
+    // and the poster is single-line-only — so committable requires the Hub's
+    // safe verdict AND a single-line anchor; everything else shows the code
+    // as a plain (non-committable) block with the reason.
+    const committable =
+      item.suggestion.safe === true &&
+      item.anchored &&
+      item.anchor != null &&
+      item.anchor.startLine === item.anchor.endLine;
+    if (committable) {
+      lines.push('**Suggested fix:**');
+      lines.push('');
+      lines.push('```suggestion');
+      lines.push(item.suggestion.code);
+      lines.push('```');
+    } else {
+      lines.push(`**Proposed fix** (${suggestionCaveat(item.suggestion)}):`);
+      lines.push('');
+      lines.push('```');
+      lines.push(item.suggestion.code);
+      lines.push('```');
+    }
     lines.push('');
   }
 
@@ -135,7 +167,7 @@ export function renderFallbackSection(items: FindingItem[], opts?: { maxItems?: 
 
 /** One fallback bullet: badge + title + `path`(:line) + a truncated rationale tail. */
 function renderFallbackItem(item: FindingItem): string {
-  const badge = item.severity === 'error' ? '🔴' : '🟡';
+  const badge = item.severity === 'error' ? '🔴' : item.severity === 'info' ? '⚪' : '🟡';
   const loc = item.anchor
     ? `${escapeCode(item.path)}:${item.anchor.startLine}`
     : escapeCode(item.path);
@@ -144,9 +176,28 @@ function renderFallbackItem(item: FindingItem): string {
   return `${badge} **${escapeInline(item.title)}** — \`${loc}\`${tail}`;
 }
 
+/**
+ * Caveat clause for a non-committable fix: name the out-of-diff callers the
+ * Hub proved would also need updating (the graph moat sentence), or the
+ * generic "could not verify" copy. Keep byte-identical to the Hub renderer
+ * (gitnexus-hub checks/render-finding-comment.ts downgradeCaveat).
+ */
+function suggestionCaveat(suggestion: NonNullable<FindingItem['suggestion']>): string {
+  if (suggestion.blockedBy && suggestion.blockedBy.length > 0) {
+    const named = suggestion.blockedBy
+      .slice(0, MAX_CALLERS)
+      .map((c) => `\`${callerLoc(c)}\``)
+      .join(', ');
+    return `not committable — this fix also requires updating ${named}`;
+  }
+  return 'not committable — GitNexus could not verify this fix is local; review call sites before applying';
+}
+
 /** Severity → emoji + bold label for the finding badge. */
-function severityBadge(severity: 'warning' | 'error'): string {
-  return severity === 'error' ? '🔴 **Error**' : '🟡 **Warning**';
+function severityBadge(severity: 'warning' | 'error' | 'info'): string {
+  if (severity === 'error') return '🔴 **Error**';
+  if (severity === 'info') return '⚪ Nit';
+  return '🟡 **Warning**';
 }
 
 /** `path:line` for a known caller, dropping the suffix when the line is absent. */
@@ -167,8 +218,8 @@ function footer(item: FindingItem): string {
 
 /** Order errors before warnings, then higher confidence first. */
 function bySeverityThenConfidence(a: FindingItem, b: FindingItem): number {
-  const sa = a.severity === 'error' ? 0 : 1;
-  const sb = b.severity === 'error' ? 0 : 1;
+  const sa = a.severity === 'error' ? 0 : a.severity === 'info' ? 2 : 1;
+  const sb = b.severity === 'error' ? 0 : b.severity === 'info' ? 2 : 1;
   if (sa !== sb) return sa - sb;
   return b.confidence - a.confidence;
 }

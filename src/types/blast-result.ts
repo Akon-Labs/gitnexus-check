@@ -258,7 +258,10 @@ export interface SinceLastCommit {
  *                               review-comment marker so a re-run updates in place.
  * @params: (checkId)         -> Detector id (e.g. 'removed-export-with-consumers').
  * @params: (origin)          -> 'deterministic' (Tier-D, graph-proven) or 'generated' (Tier-G, LLM).
- * @params: (severity)        -> 'warning' | 'error'; drives the badge + the severity floor.
+ * @params: (severity)        -> 'error' | 'warning' | 'info'; drives the badge + the severity floor.
+ *                               'info' is a MINOR REAL DEFECT (a nit), not a style preference — it
+ *                               renders muted and sorts last. An older Action drops it, which is the
+ *                               correct failure: a nit is the one finding class safe to lose.
  * @params: (confidence)      -> 0..1 Hub confidence; drives fallback ordering.
  * @params: (title/rationale) -> Hub-sanitized display text; the Action still escapes markdown structure.
  * @params: (path)            -> NEW-side file path the finding is about; the review comment's path.
@@ -273,7 +276,7 @@ export interface FindingItem {
   fingerprint: string;
   checkId: string;
   origin: 'deterministic' | 'generated';
-  severity: 'warning' | 'error';
+  severity: 'warning' | 'error' | 'info';
   confidence: number;
   title: string;
   rationale: string;
@@ -283,6 +286,18 @@ export interface FindingItem {
   enclosingSymbol?: string;
   callers?: Array<{ filePath: string; startLine?: number }>;
   category?: string;
+  /**
+   * Hub-validated fix (additive; absent on older Hubs). safe:true renders as
+   * a committable ```suggestion fence when the anchor is single-line;
+   * safe:false renders as a plain block + caveat naming blockedBy callers.
+   * REVALIDATED client-side by normalizeSuggestion — a committable artifact
+   * is never trusted straight off the wire.
+   */
+  suggestion?: {
+    code: string;
+    safe: boolean;
+    blockedBy?: Array<{ filePath: string; startLine?: number }>;
+  };
 }
 
 /**
@@ -306,6 +321,27 @@ export interface FindingsResult {
   suppressedCount: number;
   truncated: boolean;
   error: string | null;
+}
+
+/**
+ * @brief: D1 — which review SURFACES the native GitNexus App bot actively owns for
+ *         this repo, so the Action skips exactly those and never double-posts. The
+ *         App and Action can both be enabled during a migration; this lets the
+ *         Action cede a surface at a time. Per-surface, never a single boolean.
+ *
+ * @params: (active)         -> The App is engaged at all (checks on + eligible install).
+ * @params: (summary)        -> The App posts the PR summary comment (+ since-last-commit).
+ * @params: (inlineFindings) -> The App posts inline review-comment findings.
+ *
+ *         The safe default is "App owns nothing" (all false) → the Action posts
+ *         exactly as it does today. normalizeAppReview is the sole gate: an absent
+ *         field (older Hub) or any malformed value collapses to that default, so a
+ *         surface is only ever skipped on an explicit `true` from the Hub.
+ */
+export interface AppReview {
+  active: boolean;
+  summary: boolean;
+  inlineFindings: boolean;
 }
 
 export interface BlastResult {
@@ -355,6 +391,12 @@ export interface BlastResult {
   // posts line-anchored review comments for anchored items and demotes the rest
   // to the main comment's fallback section. Best-effort: never affects the gate.
   findings?: FindingsResult;
+
+  // D1: which review surfaces the native App bot owns for this repo. Optional in
+  // the interface (older Hubs omit it; keeps un-cast test literals compiling), but
+  // normalizeBlastResult ALWAYS fills it with the all-false safe default. The
+  // Action reads it to skip a surface only when the App explicitly owns it.
+  appReview?: AppReview;
 }
 
 /**
@@ -478,6 +520,25 @@ export function normalizeSinceLastCommit(v: unknown): SinceLastCommit | null {
 }
 
 /**
+ * @brief: Sole type gate for the D1 `appReview` per-surface signal. Fails SAFE:
+ *         absent / non-object / any malformed field → "App owns nothing" (all
+ *         false), so the Action posts as it does today. A surface is skipped ONLY
+ *         on an explicit boolean `true` — anything else (missing, truthy non-bool,
+ *         string 'true') reads as false and the Action keeps posting.
+ *
+ * @params: (v: unknown) -> The `appReview` field off a Hub response body.
+ * @returns: AppReview — always a complete object; defaults to all-false.
+ */
+export function normalizeAppReview(v: unknown): AppReview {
+  if (!isObject(v)) return { active: false, summary: false, inlineFindings: false };
+  return {
+    active: v.active === true,
+    summary: v.summary === true,
+    inlineFindings: v.inlineFindings === true,
+  };
+}
+
+/**
  * @brief: Coerce a BlastResult-shaped object into a fully-populated
  *         BlastResult by filling missing arrays with `[]`, normalising
  *         optional nullable scalars, and clamping `blastLevel` to the
@@ -508,6 +569,7 @@ export function normalizeBlastResult(value: BlastResult): BlastResult {
     aiSummary: typeof value.aiSummary === 'string' ? value.aiSummary : null,
     sinceLastCommit: normalizeSinceLastCommit(value.sinceLastCommit),
     findings: normalizeFindings(value.findings),
+    appReview: normalizeAppReview(value.appReview),
     truncated: Boolean(value.truncated),
     stale: Boolean(value.stale),
     prTitle: value.prTitle ?? null,
@@ -651,7 +713,7 @@ function normalizeFindingItem(v: unknown): FindingItem | null {
   if (!FINGERPRINT_RE.test(fingerprint)) return null;
   if (typeof checkId !== 'string') return null;
   if (origin !== 'deterministic' && origin !== 'generated') return null;
-  if (severity !== 'warning' && severity !== 'error') return null;
+  if (severity !== 'warning' && severity !== 'error' && severity !== 'info') return null;
   if (typeof confidence !== 'number' || !Number.isFinite(confidence)) return null;
   if (typeof title !== 'string' || title.length === 0) return null;
   if (typeof rationale !== 'string') return null;
@@ -679,7 +741,41 @@ function normalizeFindingItem(v: unknown): FindingItem | null {
   const callers = normalizeCallers(v.callers);
   if (callers.length > 0) item.callers = callers;
   if (typeof v.category === 'string' && v.category.length > 0) item.category = v.category;
+  const suggestion = normalizeSuggestion(v.suggestion);
+  if (suggestion) item.suggestion = suggestion;
   return item;
+}
+
+/** Suggestion size caps — keep identical to the Hub's suggestion-gate.ts. */
+const MAX_SUGGESTION_LINES = 15;
+const MAX_SUGGESTION_CHARS = 1_500;
+
+/**
+ * Client-side revalidation of a Hub suggestion — mandatory for a committable
+ * artifact (render-findings.ts splices `code` inside a fence VERBATIM, past
+ * neutralizeMarkup). Mirrors the Hub gate's content rules: string, LF-only,
+ * size caps, no line able to open/close a fence, no HTML-comment delimiters
+ * (the reconcile marker regexes scan the RAW body), no NUL. A malformed value
+ * drops the FIELD, never the finding. `safe` must be literally true to stay
+ * committable; anything else renders as the plain-block variant.
+ */
+function normalizeSuggestion(v: unknown): FindingItem['suggestion'] | undefined {
+  if (!isObject(v)) return undefined;
+  const { code, safe } = v;
+  if (typeof code !== 'string' || code.trim().length === 0) return undefined;
+  if (code.length > MAX_SUGGESTION_CHARS || code.includes('\r') || code.includes('\u0000')) {
+    return undefined;
+  }
+  const lines = code.split('\n');
+  if (lines.length > MAX_SUGGESTION_LINES) return undefined;
+  if (lines.some((l) => /^\s*(`{3,}|~{3,})/.test(l))) return undefined;
+  if (code.includes('<!--') || code.includes('-->')) return undefined;
+  const blockedBy = normalizeCallers(v.blockedBy);
+  return {
+    code,
+    safe: safe === true,
+    ...(blockedBy.length > 0 ? { blockedBy } : {}),
+  };
 }
 
 /**
