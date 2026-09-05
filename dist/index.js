@@ -34569,6 +34569,8 @@ exports.validateHubUrl = validateHubUrl;
 exports.resolveRepoId = resolveRepoId;
 exports.refreshBlast = refreshBlast;
 exports.getBlast = getBlast;
+exports.requestFindingReply = requestFindingReply;
+exports.isFindingReplyResultFor = isFindingReplyResultFor;
 const axios_1 = __importDefault(__nccwpck_require__(7269));
 const blast_result_1 = __nccwpck_require__(5585);
 const classify_error_1 = __nccwpck_require__(6042);
@@ -34582,6 +34584,12 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024; // 5MB hard cap on JSON body
 /** SHA shape guard — 7..40 hex. A present-but-malformed headSha throws (loud). */
 const SHA_RE = /^[0-9a-f]{7,40}$/i;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const FINGERPRINT_RE = /^[0-9a-f]{64}(?:-(?:[2-9]|[1-9][0-9]+))?$/;
+const MAX_QUESTION_CHARS = 4_000;
+const MAX_REPLY_WIRE_CHARS = 8_001;
+const MAX_EVIDENCE = 9;
+const MAX_EVIDENCE_PATH_CHARS = 500;
 /**
  * @brief: Validate a URL string at the trust boundary. Rejects anything
  *         not `https://` and strips at most one trailing slash so the
@@ -34707,6 +34715,83 @@ async function getBlast(opts) {
     }
     return (0, blast_result_1.normalizeBlastResult)(body);
 }
+/** Ask the Hub to answer one human reply about one current inline finding. */
+async function requestFindingReply(opts) {
+    if (!UUID_RE.test(opts.repoId))
+        throw new Error('invalid repoId shape');
+    if (!Number.isSafeInteger(opts.prNumber) || opts.prNumber <= 0) {
+        throw new Error('invalid prNumber');
+    }
+    if (!FINGERPRINT_RE.test(opts.fingerprint))
+        throw new Error('invalid fingerprint');
+    if (!SHA_RE.test(opts.headSha))
+        throw new Error('invalid headSha shape');
+    if (!Number.isSafeInteger(opts.triggerCommentId) || opts.triggerCommentId <= 0) {
+        throw new Error('invalid trigger comment id');
+    }
+    const question = typeof opts.question === 'string' ? opts.question.trim() : '';
+    if (!question || question.length > MAX_QUESTION_CHARS)
+        throw new Error('invalid question');
+    const hubUrl = validateHubUrl(opts.hubUrl);
+    const res = await axios_1.default.post(`${hubUrl}/api/repos/${opts.repoId}/prs/${opts.prNumber}/findings/${opts.fingerprint}/reply`, { schemaVersion: '1', headSha: opts.headSha, question }, {
+        headers: {
+            ...hubHeaders(opts.token),
+            'Idempotency-Key': `gitnexus-review-reply:v1:${opts.triggerCommentId}`,
+        },
+        timeout: DEFAULT_TIMEOUT_MS,
+        maxContentLength: MAX_RESPONSE_BYTES,
+        maxBodyLength: MAX_RESPONSE_BYTES,
+    });
+    if (!isFindingReplyResultFor(res.data, {
+        fingerprint: opts.fingerprint,
+        analyzedSha: opts.headSha,
+    })) {
+        throw new classify_error_1.SchemaMismatchError('POST finding reply response failed validation');
+    }
+    return res.data;
+}
+/** Strict response validation, also reused by the GitHub orchestrator. */
+function isFindingReplyResultFor(value, expected) {
+    if (!isObject(value))
+        return false;
+    if (!hasExactKeys(value, ['analyzedSha', 'evidence', 'fingerprint', 'reply', 'schemaVersion', 'verdict'])) {
+        return false;
+    }
+    if (value.schemaVersion !== '1' ||
+        value.fingerprint !== expected.fingerprint ||
+        !FINGERPRINT_RE.test(String(value.fingerprint)) ||
+        value.analyzedSha !== expected.analyzedSha ||
+        !SHA_RE.test(String(value.analyzedSha)) ||
+        (value.verdict !== 'supported' &&
+            value.verdict !== 'uncertain' &&
+            value.verdict !== 'not-supported') ||
+        typeof value.reply !== 'string' ||
+        value.reply.trim().length === 0 ||
+        value.reply.length > MAX_REPLY_WIRE_CHARS ||
+        !Array.isArray(value.evidence) ||
+        value.evidence.length > MAX_EVIDENCE) {
+        return false;
+    }
+    let anchors = 0;
+    let otherEvidence = 0;
+    for (const raw of value.evidence) {
+        if (!isObject(raw) || !hasExactKeys(raw, ['kind', 'path', 'startLine']))
+            return false;
+        if (typeof raw.path !== 'string' ||
+            raw.path.trim().length === 0 ||
+            raw.path.length > MAX_EVIDENCE_PATH_CHARS ||
+            !Number.isSafeInteger(raw.startLine) ||
+            Number(raw.startLine) <= 0 ||
+            (raw.kind !== 'anchor' && raw.kind !== 'caller' && raw.kind !== 'graph')) {
+            return false;
+        }
+        if (raw.kind === 'anchor')
+            anchors++;
+        else
+            otherEvidence++;
+    }
+    return anchors <= 1 && otherEvidence <= 8;
+}
 /**
  * @brief: Build the header set every Hub call uses. Centralised so the
  *         `X-Device-Fingerprint` requirement (added 2026-05 to the Hub for
@@ -34752,6 +34837,10 @@ function parseRepoList(res) {
 }
 function isObject(v) {
     return typeof v === 'object' && v !== null;
+}
+function hasExactKeys(value, expected) {
+    const actual = Object.keys(value).sort();
+    return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
 }
 
 
@@ -34815,6 +34904,7 @@ const post_review_1 = __nccwpck_require__(2122);
 const render_findings_1 = __nccwpck_require__(4298);
 const gate_1 = __nccwpck_require__(1956);
 const slm_format_1 = __nccwpck_require__(8449);
+const review_reply_1 = __nccwpck_require__(7630);
 /**
  * @brief: Top-level orchestration. Sequence:
  *           1. Read inputs + validate event shape (non-PR → warn + exit 0).
@@ -34846,10 +34936,33 @@ const slm_format_1 = __nccwpck_require__(8449);
  * @returns: void — exits via core.setFailed on error or returns cleanly.
  */
 async function main() {
+    const ctx = github.context;
+    if (ctx.eventName === 'pull_request_review_comment') {
+        if (ctx.payload.action !== 'created')
+            return;
+        try {
+            const hubUrl = (0, hub_client_1.validateHubUrl)(core.getInput('hub-url', { required: true }));
+            const token = core.getInput('token', { required: true });
+            const githubToken = core.getInput('github-token', { required: true });
+            await (0, review_reply_1.handleReviewReply)({
+                client: (0, review_reply_1.asReviewReplyClient)(github.getOctokit(githubToken)),
+                hubUrl,
+                token,
+                owner: ctx.repo.owner,
+                repo: ctx.repo.repo,
+                prNumber: ctx.payload.pull_request?.number,
+                eventComment: ctx.payload.comment,
+                warning: core.warning,
+            });
+        }
+        catch {
+            core.warning('GitNexus finding reply skipped because its configuration or event payload was invalid.');
+        }
+        return;
+    }
     const hubUrl = (0, hub_client_1.validateHubUrl)(core.getInput('hub-url', { required: true }));
     const token = core.getInput('token', { required: true });
     const githubToken = core.getInput('github-token', { required: true });
-    const ctx = github.context;
     if (ctx.eventName !== 'pull_request') {
         core.warning(`gitnexus-check runs on pull_request events; got "${ctx.eventName}". Skipping.`);
         return;
@@ -37021,6 +37134,249 @@ function sanitizeProse(text) {
  */
 function escapeCode(value) {
     return value.replace(/\|/g, '\\|').replace(/`/g, "'").replace(/\r?\n/g, ' ');
+}
+
+
+/***/ }),
+
+/***/ 7394:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.reviewReplyMarker = reviewReplyMarker;
+exports.startsWithReviewReplyMarker = startsWithReviewReplyMarker;
+exports.renderFindingReply = renderFindingReply;
+/** Hidden idempotency marker placed at the start of each Action-owned answer. */
+const REPLY_MARKER_PREFIX = '<!-- gitnexus-finding-reply:v1:';
+const REPLY_MARKER_AT_START_RE = /^<!-- gitnexus-finding-reply:v1:[1-9][0-9]* -->/;
+const MAX_REPLY_CHARS = 8_001;
+const ZWSP = '\u200B';
+/** Build the marker used to deduplicate one human review-comment trigger. */
+function reviewReplyMarker(triggerCommentId) {
+    if (!Number.isSafeInteger(triggerCommentId) || triggerCommentId <= 0) {
+        throw new Error('invalid trigger comment id');
+    }
+    return `${REPLY_MARKER_PREFIX}${triggerCommentId} -->`;
+}
+/** True only for an Action-rendered answer marker in its canonical lead position. */
+function startsWithReviewReplyMarker(body) {
+    return REPLY_MARKER_AT_START_RE.test(body);
+}
+/**
+ * Render a Hub answer for a GitHub review thread. The Hub already sanitizes its
+ * provider output; these transformations are an idempotent second boundary so
+ * a malformed or older Hub cannot open HTML comments/fences or ping users.
+ */
+function renderFindingReply(opts) {
+    if (typeof opts.reply !== 'string' ||
+        opts.reply.trim().length === 0 ||
+        opts.reply.length > MAX_REPLY_CHARS) {
+        throw new Error('invalid finding reply');
+    }
+    return `${reviewReplyMarker(opts.triggerCommentId)}\n\n${neutralizeReply(opts.reply.trim())}`;
+}
+function neutralizeReply(text) {
+    return escapeAtMentions(escapeFenceLines(breakCommentDelimiters(text)));
+}
+function breakCommentDelimiters(text) {
+    return text.replace(/<!--/g, `<!-${ZWSP}-`).replace(/-->/g, `-${ZWSP}->`);
+}
+function escapeFenceLines(text) {
+    return text
+        .split('\n')
+        .map((line) => line.replace(/^((?:\s{0,3}(?:>\s?|[-*+]\s+|\d{1,9}[.)]\s+))*\s*)(`{3,}|~{3,})/, '$1\\$2'))
+        .join('\n');
+}
+function escapeAtMentions(text) {
+    return text.replace(/(^|[^\w])@(?=[A-Za-z0-9])/g, `$1@${ZWSP}`);
+}
+
+
+/***/ }),
+
+/***/ 7630:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.handleReviewReply = handleReviewReply;
+exports.asReviewReplyClient = asReviewReplyClient;
+const hub_client_1 = __nccwpck_require__(4162);
+const post_comment_1 = __nccwpck_require__(1229);
+const render_findings_1 = __nccwpck_require__(4298);
+const render_reply_1 = __nccwpck_require__(7394);
+const FINGERPRINT_RE = /^[0-9a-f]{64}(?:-(?:[2-9]|[1-9][0-9]+))?$/;
+const SHA_RE = /^[0-9a-f]{7,40}$/i;
+const MAX_QUESTION_CHARS = 4_000;
+const PER_PAGE = 100;
+const LIST_ROUTE = 'GET /repos/{owner}/{repo}/pulls/{pull_number}/comments';
+const REPLY_ROUTE = 'POST /repos/{owner}/{repo}/pulls/{pull_number}/comments/{comment_id}/replies';
+const defaultHub = { resolveRepoId: hub_client_1.resolveRepoId, requestFindingReply: hub_client_1.requestFindingReply };
+/**
+ * Answer an eligible human reply to an Action-owned inline finding. This is a
+ * presentation-only path: every transport failure is reduced to a fixed warning
+ * and no raw body, provider output, prompt, or token is logged.
+ */
+async function handleReviewReply(opts) {
+    const trigger = validateTrigger(opts);
+    if (!trigger)
+        return { action: 'skipped' };
+    try {
+        const parentResponse = await opts.client.rest.pulls.getReviewComment({
+            owner: opts.owner,
+            repo: opts.repo,
+            comment_id: trigger.parentId,
+        });
+        const parent = parentResponse.data;
+        if (!isEligibleParent(parent, opts, trigger.parentId))
+            return { action: 'skipped' };
+        const fingerprint = (0, render_findings_1.findingFingerprintFromBody)(parent.body);
+        if (fingerprint === null || !FINGERPRINT_RE.test(fingerprint)) {
+            return { action: 'skipped' };
+        }
+        const actorLogin = await (0, post_comment_1.resolveActorLogin)(opts.client);
+        if (!isStrictlyOwned(parent.user, actorLogin))
+            return { action: 'skipped' };
+        const marker = (0, render_reply_1.reviewReplyMarker)(trigger.id);
+        if (await hasOwnedMarker(opts.client, opts, marker, actorLogin)) {
+            return { action: 'skipped' };
+        }
+        const headSha = await currentHeadSha(opts.client, opts);
+        if (!headSha)
+            return { action: 'skipped' };
+        const hub = opts.hub ?? defaultHub;
+        const repoId = await hub.resolveRepoId({
+            hubUrl: opts.hubUrl,
+            token: opts.token,
+            fullName: `${opts.owner}/${opts.repo}`,
+        });
+        const answer = await hub.requestFindingReply({
+            hubUrl: opts.hubUrl,
+            token: opts.token,
+            repoId,
+            prNumber: opts.prNumber,
+            fingerprint,
+            headSha,
+            question: trigger.question,
+            triggerCommentId: trigger.id,
+        });
+        if (!(0, hub_client_1.isFindingReplyResultFor)(answer, { fingerprint, analyzedSha: headSha })) {
+            return { action: 'skipped' };
+        }
+        if (await hasOwnedMarker(opts.client, opts, marker, actorLogin)) {
+            return { action: 'skipped' };
+        }
+        const latestHeadSha = await currentHeadSha(opts.client, opts);
+        if (latestHeadSha !== headSha)
+            return { action: 'skipped' };
+        await opts.client.request(REPLY_ROUTE, {
+            owner: opts.owner,
+            repo: opts.repo,
+            pull_number: opts.prNumber,
+            comment_id: trigger.parentId,
+            body: (0, render_reply_1.renderFindingReply)({ triggerCommentId: trigger.id, reply: answer.reply }),
+        });
+        return { action: 'posted' };
+    }
+    catch {
+        opts.warning('GitNexus finding reply skipped because a GitHub or Hub request failed.');
+        return { action: 'skipped' };
+    }
+}
+function validateTrigger(opts) {
+    if (!/^[\w.-]+$/.test(opts.owner) ||
+        !/^[\w.-]+$/.test(opts.repo) ||
+        !Number.isSafeInteger(opts.prNumber) ||
+        opts.prNumber <= 0 ||
+        !isRecord(opts.eventComment)) {
+        return null;
+    }
+    const comment = opts.eventComment;
+    const question = typeof comment.body === 'string' ? comment.body.trim() : '';
+    if (!Number.isSafeInteger(comment.id) ||
+        Number(comment.id) <= 0 ||
+        !Number.isSafeInteger(comment.in_reply_to_id) ||
+        Number(comment.in_reply_to_id) <= 0 ||
+        !isRecord(comment.user) ||
+        comment.user.type !== 'User' ||
+        !question ||
+        question.length > MAX_QUESTION_CHARS ||
+        (0, render_reply_1.startsWithReviewReplyMarker)(question)) {
+        return null;
+    }
+    return { id: Number(comment.id), parentId: Number(comment.in_reply_to_id), question };
+}
+function isEligibleParent(parent, opts, parentId) {
+    return (parent.id === parentId &&
+        parent.in_reply_to_id == null &&
+        typeof parent.body === 'string' &&
+        samePullRequest(parent.pull_request_url, opts));
+}
+function samePullRequest(rawUrl, opts) {
+    if (typeof rawUrl !== 'string')
+        return false;
+    try {
+        const path = new URL(rawUrl).pathname.replace(/\/+$/, '').toLowerCase();
+        return path === `/repos/${opts.owner}/${opts.repo}/pulls/${opts.prNumber}`.toLowerCase();
+    }
+    catch {
+        return false;
+    }
+}
+function isStrictlyOwned(user, actorLogin) {
+    if (actorLogin !== null)
+        return user?.login === actorLogin;
+    return user?.type === 'Bot' && user.login === 'github-actions[bot]';
+}
+async function hasOwnedMarker(client, opts, marker, actorLogin) {
+    for await (const page of client.paginate.iterator(LIST_ROUTE, {
+        owner: opts.owner,
+        repo: opts.repo,
+        pull_number: opts.prNumber,
+        per_page: PER_PAGE,
+    })) {
+        for (const comment of page.data) {
+            if (typeof comment.body === 'string' &&
+                comment.body.includes(marker) &&
+                isStrictlyOwned(comment.user, actorLogin)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+async function currentHeadSha(client, opts) {
+    const res = await client.rest.pulls.get({
+        owner: opts.owner,
+        repo: opts.repo,
+        pull_number: opts.prNumber,
+    });
+    const sha = res.data.head?.sha;
+    return typeof sha === 'string' && SHA_RE.test(sha) ? sha : null;
+}
+function isRecord(value) {
+    return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+/** Narrow a full Octokit instance to the reply path's reviewed surface. */
+function asReviewReplyClient(octokit) {
+    return {
+        paginate: {
+            iterator: (route, params) => octokit.paginate.iterator(route, params),
+        },
+        rest: {
+            pulls: {
+                get: (params) => octokit.rest.pulls.get(params),
+                getReviewComment: (params) => octokit.rest.pulls.getReviewComment(params),
+            },
+            users: {
+                getAuthenticated: () => octokit.rest.users.getAuthenticated(),
+            },
+        },
+        request: (route, params) => octokit.request(route, params),
+    };
 }
 
 

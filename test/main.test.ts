@@ -33,6 +33,8 @@ vi.mock('@actions/core', () => ({
 const ghContext = {
   eventName: 'pull_request',
   payload: {
+    action: undefined as string | undefined,
+    comment: undefined as Record<string, unknown> | undefined,
     // Absent by default (same-repo PR). Fork tests set repository + head.repo to
     // exercise the fork precheck; beforeEach resets both.
     repository: undefined as { full_name?: string } | undefined,
@@ -101,6 +103,13 @@ vi.mock('../src/post-review', async () => {
   };
 });
 
+const handleReviewReplySpy = vi.fn();
+const asReviewReplyClientSpy = vi.fn(() => ({}));
+vi.mock('../src/review-reply', () => ({
+  handleReviewReply: (...args: unknown[]) => handleReviewReplySpy(...args),
+  asReviewReplyClient: (...args: unknown[]) => asReviewReplyClientSpy(...args),
+}));
+
 const parseThresholdSpy = vi.fn();
 const evaluateGateSpy = vi.fn();
 vi.mock('../src/gate', async () => {
@@ -133,6 +142,8 @@ beforeEach(() => {
   inputs['token'] = 'gnx_test';
   inputs['github-token'] = 'ghp_test';
   ghContext.eventName = 'pull_request';
+  ghContext.payload.action = undefined;
+  ghContext.payload.comment = undefined;
   ghContext.payload.repository = undefined;
   ghContext.payload.pull_request.number = 152;
   ghContext.payload.pull_request.draft = undefined;
@@ -149,6 +160,9 @@ beforeEach(() => {
   parseThresholdSpy.mockReset();
   evaluateGateSpy.mockReset();
   reconcileSpy.mockReset();
+  handleReviewReplySpy.mockReset();
+  handleReviewReplySpy.mockResolvedValue({ action: 'skipped' });
+  asReviewReplyClientSpy.mockClear();
   reconcileSpy.mockResolvedValue({ posted: 0, updated: 0, failed: [] });
   // Default: advisory gate (empty input → null threshold → neutral).
   parseThresholdSpy.mockReturnValue(null);
@@ -325,6 +339,68 @@ describe('main — non-PR event', () => {
     await main();
     expect(warningSpy).toHaveBeenCalled();
     expect(resolveSpy).not.toHaveBeenCalled();
+    expect(setFailedSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe('main — review-thread reply dispatch', () => {
+  it('dispatches created review-comment events without entering the pull_request pipeline', async () => {
+    ghContext.eventName = 'pull_request_review_comment';
+    ghContext.payload.action = 'created';
+    ghContext.payload.comment = {
+      id: 901,
+      body: 'Why?',
+      in_reply_to_id: 900,
+      user: { login: 'reviewer', type: 'User' },
+    };
+
+    const { main } = await import('../src/main');
+    await main();
+
+    expect(handleReviewReplySpy).toHaveBeenCalledOnce();
+    expect(handleReviewReplySpy.mock.calls[0][0]).toMatchObject({
+      hubUrl: 'https://hub.example.com',
+      token: 'gnx_test',
+      owner: 'Akon-Labs',
+      repo: 'gitnexus-enterprise',
+      prNumber: 152,
+      eventComment: ghContext.payload.comment,
+    });
+    expect(resolveSpy).not.toHaveBeenCalled();
+    expect(refreshSpy).not.toHaveBeenCalled();
+    expect(getBlastSpy).not.toHaveBeenCalled();
+    expect(postSpy).not.toHaveBeenCalled();
+    expect(reconcileSpy).not.toHaveBeenCalled();
+    expect(evaluateGateSpy).not.toHaveBeenCalled();
+    expect(setFailedSpy).not.toHaveBeenCalled();
+  });
+
+  it('ignores non-created review-comment events before reading required inputs', async () => {
+    ghContext.eventName = 'pull_request_review_comment';
+    ghContext.payload.action = 'edited';
+    inputs['hub-url'] = '';
+    inputs.token = '';
+    inputs['github-token'] = '';
+
+    const { main } = await import('../src/main');
+    await main();
+
+    expect(handleReviewReplySpy).not.toHaveBeenCalled();
+    expect(setFailedSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps reply-branch configuration failures presentation-only', async () => {
+    ghContext.eventName = 'pull_request_review_comment';
+    ghContext.payload.action = 'created';
+    inputs['hub-url'] = 'http://unsafe.example.com';
+
+    const { main } = await import('../src/main');
+    await main();
+
+    expect(handleReviewReplySpy).not.toHaveBeenCalled();
+    expect(warningSpy).toHaveBeenCalledWith(
+      'GitNexus finding reply skipped because its configuration or event payload was invalid.',
+    );
     expect(setFailedSpy).not.toHaveBeenCalled();
   });
 });

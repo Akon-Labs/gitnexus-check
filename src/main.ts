@@ -23,6 +23,7 @@ import { renderFallbackSection } from './render-findings';
 import { parseThreshold, evaluateGate } from './gate';
 import { composeWithDigest, renderSinceCommitComment, sinceCommitMarker } from './slm-format';
 import type { FindingItem } from './types/blast-result';
+import { asReviewReplyClient, handleReviewReply } from './review-reply';
 
 /**
  * @brief: Top-level orchestration. Sequence:
@@ -55,11 +56,35 @@ import type { FindingItem } from './types/blast-result';
  * @returns: void — exits via core.setFailed on error or returns cleanly.
  */
 export async function main(): Promise<void> {
+  const ctx = github.context;
+  if (ctx.eventName === 'pull_request_review_comment') {
+    if (ctx.payload.action !== 'created') return;
+    try {
+      const hubUrl = validateHubUrl(core.getInput('hub-url', { required: true }));
+      const token = core.getInput('token', { required: true });
+      const githubToken = core.getInput('github-token', { required: true });
+      await handleReviewReply({
+        client: asReviewReplyClient(github.getOctokit(githubToken)),
+        hubUrl,
+        token,
+        owner: ctx.repo.owner,
+        repo: ctx.repo.repo,
+        prNumber: (ctx.payload.pull_request as { number?: unknown } | undefined)?.number as number,
+        eventComment: ctx.payload.comment,
+        warning: core.warning,
+      });
+    } catch {
+      core.warning(
+        'GitNexus finding reply skipped because its configuration or event payload was invalid.',
+      );
+    }
+    return;
+  }
+
   const hubUrl = validateHubUrl(core.getInput('hub-url', { required: true }));
   const token = core.getInput('token', { required: true });
   const githubToken = core.getInput('github-token', { required: true });
 
-  const ctx = github.context;
   if (ctx.eventName !== 'pull_request') {
     core.warning(`gitnexus-check runs on pull_request events; got "${ctx.eventName}". Skipping.`);
     return;

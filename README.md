@@ -100,6 +100,14 @@ name: GitNexus
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
+  pull_request_review_comment:
+    types: [created]
+
+# Serialize analysis and reply runs for each PR. GitHub has no atomic
+# create-if-absent API for review-thread replies.
+concurrency:
+  group: gitnexus-${{ github.repository }}-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -185,6 +193,27 @@ While `inline-findings` is on, the action stays silent on **draft** PRs and post
 review the moment the PR is marked ready — so add `ready_for_review` to the workflow
 trigger (as shown in the Quick Start template). With `inline-findings` off, behavior is
 unchanged: the main comment is posted on drafts as before.
+
+When the same workflow opts in to `pull_request_review_comment: { types: [created] }`, a
+human can reply directly to an inline finding posted by this Action. GitNexus automatically
+answers in that review thread using the current PR head and the selected finding's bounded
+graph evidence. The workflow keeps its existing `pull-requests: write` permission and needs
+no additional Action input. This Action-owned path recognizes only findings authored by the
+workflow identity; replies to comments owned by a native GitNexus App subscription are handled
+separately by that App.
+
+Use the per-PR concurrency group in the workflow example with `cancel-in-progress: false`.
+The Action also checks its answer marker before and after Hub work, but GitHub does not offer
+an atomic create-if-absent reply endpoint. GitHub concurrency permits at most one running and
+one pending job per group, and a newer queued event can replace an older pending event. If
+several replies arrive while a long analysis is running, rerun any event that did not receive
+an answer.
+
+`pull_request_review_comment` workflows use GitHub's pull-request merge ref; this Action does
+not check out or execute PR code for a reply. Fork pull requests normally cannot use this
+feature because repository secrets are withheld and their `GITHUB_TOKEN` is read-only. Do not
+switch to `pull_request_target` to work around those protections; GitNexus does not require or
+recommend that event.
 
 ## How it works
 
